@@ -1,68 +1,39 @@
-import NextAuth from "next-auth";
 import { NextResponse } from "next/server";
-import authConfig from "@/auth.config";
-import { isLinkPreviewBot } from "@/lib/link-preview";
-import { BASE_PATH, toAppPath } from "@/lib/base-path";
+import { getToken } from "next-auth/jwt";
+import { BASE_PATH } from "@/lib/base-path";
 
 /**
- * Edge-only auth wrapper — initialized from auth.config (no Prisma/bcrypt).
- * Importing `@/auth` here balloons the Edge Function past Vercel's 1 MB limit
- * and leaves production stuck on the old getToken middleware (redirect loops).
+ * Demo paths that are accessible without authentication (public demo mode)
  */
-const { auth } = NextAuth(authConfig);
+const DEMO_PATHS = [
+  "/dashboard",
+  "/settings",
+  "/settings/agents",
+  "/escalations",
+  "/feed",
+  "/workers",
+  "/leaderboard",
+  "/projects",
+  "/notifications",
+  "/team",
+  "/docs",
+];
 
-/** Issue detail paths only — enough for unfurl bots to hit generateMetadata. */
-const ISSUE_DETAIL_PATH = /^\/(?:issues|bugs)\/[^/]+\/?$/;
-
-export function isPublicPath(
-  pathWithoutBase: string,
-  userAgent?: string | null,
-): boolean {
-  const isAuthPage =
-    pathWithoutBase.startsWith("/login") || pathWithoutBase.startsWith("/signup");
-  const isPasswordResetPage =
-    pathWithoutBase.startsWith("/forgot-password") ||
-    pathWithoutBase.startsWith("/reset-password");
-  const isIssuePreview =
-    ISSUE_DETAIL_PATH.test(pathWithoutBase) &&
-    isLinkPreviewBot(userAgent);
-
-  return (
-    pathWithoutBase === "/" ||
-    pathWithoutBase === "" ||
-    pathWithoutBase === "/llms.txt" ||
-    isAuthPage ||
-    isPasswordResetPage ||
-    isIssuePreview ||
-    pathWithoutBase === "/" ||
-    pathWithoutBase.startsWith("/session-expired") ||
-    // Shareable invite links (#444). Guests must see the organization and
-    // sign in with Google before the link is used; the page itself never
-    // spends a use.
-    pathWithoutBase === "/join" ||
-    pathWithoutBase.startsWith("/join/") ||
-    pathWithoutBase.startsWith("/api/auth") ||
-    pathWithoutBase.startsWith("/api/health") ||
-    // GitHub calls this with an HMAC signature, not a session (#474).
-    pathWithoutBase === "/api/github/webhook" ||
-    // The scheduler calls the platform sweeps with Bearer CRON_SECRET and no
-    // session (#571); the route rejects a wrong or missing secret itself.
-    pathWithoutBase === "/api/internal/cron" ||
-    // The agent API (#427) authenticates every call with an agent key, not a
-    // session; each route rejects a request without one.
-    pathWithoutBase.startsWith("/api/v1/") ||
-    pathWithoutBase.startsWith("/_next") ||
-    pathWithoutBase === "/favicon.ico"
-  );
+function isDemoPath(path: string): boolean {
+  return DEMO_PATHS.some((p) => path === p || path.startsWith(p + "/"));
 }
 
-export default auth((req) => {
-  const pathWithoutBase = toAppPath(req.nextUrl.pathname);
-  const isLoggedIn = !!req.auth?.user;
+/**
+ * Middleware — handles /bugs redirects and auth for non-demo paths.
+ * Demo paths bypass auth entirely.
+ */
+export async function middleware(req: import("next/server").NextRequest) {
+  const rawPath = req.nextUrl.pathname;
 
   // Seamless backwards compatibility: redirect /bugs and /bugs/* to /issues and /issues/*
-  if (pathWithoutBase === "/bugs" || pathWithoutBase.startsWith("/bugs/")) {
-    const newPath = pathWithoutBase.replace(/^\/bugs/, "/issues");
+  const isBugsPath = rawPath === "/bugs" || rawPath.startsWith("/bugs/");
+  if (isBugsPath) {
+    const newPath = rawPath.replace(/^\/bugs/, "/issues");
     const targetUrl = new URL(
       BASE_PATH ? `${BASE_PATH}${newPath}` : newPath,
       req.nextUrl.origin,
@@ -70,8 +41,8 @@ export default auth((req) => {
     targetUrl.search = req.nextUrl.search;
     return NextResponse.redirect(targetUrl, 308);
   }
-  if (pathWithoutBase.startsWith("/api/bugs/")) {
-    const newPath = pathWithoutBase.replace(/^\/api\/bugs\//, "/api/issues/");
+  if (rawPath.startsWith("/api/bugs/")) {
+    const newPath = rawPath.replace(/^\/api\/bugs\//, "/api/issues/");
     const targetUrl = new URL(
       BASE_PATH ? `${BASE_PATH}${newPath}` : newPath,
       req.nextUrl.origin,
@@ -80,43 +51,44 @@ export default auth((req) => {
     return NextResponse.redirect(targetUrl, 308);
   }
 
-  const isAuthPage =
-    pathWithoutBase.startsWith("/login") || pathWithoutBase.startsWith("/signup");
-  const isPublic = isPublicPath(pathWithoutBase, req.headers.get("user-agent"));
+  // Demo paths: bypass auth entirely
+  if (isDemoPath(rawPath)) {
+    const requestHeaders = new Headers(req.headers);
+    requestHeaders.set("x-pathname", rawPath);
+    requestHeaders.set("x-demo-mode", "true");
+    
+    const response = NextResponse.next({
+      request: { headers: requestHeaders },
+    });
+    return response;
+  }
 
-  if (!isLoggedIn && !isPublic) {
+  // Non-demo paths: require authentication
+  const token = await getToken({ 
+    req, 
+    secret: process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET 
+  });
+  
+  if (!token) {
     const url = new URL(
       BASE_PATH ? `${BASE_PATH}/login` : "/login",
       req.nextUrl.origin,
     );
-    url.searchParams.set("callbackUrl", callbackPath(pathWithoutBase, req.nextUrl));
+    url.searchParams.set("callbackUrl", rawPath);
     return NextResponse.redirect(url);
   }
 
-  // Allow reset links even when a session exists; only bounce login/signup.
-  // Signed-in people land on the Overview, the post-login home.
-  if (isLoggedIn && isAuthPage) {
-    return NextResponse.redirect(
-      new URL(BASE_PATH ? `${BASE_PATH}/dashboard` : "/dashboard", req.nextUrl.origin),
-    );
-  }
-
-  // /admin role checks live in the pages and actions (requireAdmin /
-  // requireSuperAdmin), which read the current role from the database. The
-  // JWT role is only refreshed at sign-in, so checking it here bounced newly
-  // promoted admins until they signed out and back in (#121).
-
-  return NextResponse.next();
-});
-
-/** Keeps the agent approval code across the sign-in redirect. Other queries stay off the callback. */
-function callbackPath(path: string, url: URL): string {
-  if (path !== "/settings/agents/pair") return path;
-  const code = url.searchParams.get("code") ?? "";
-  if (!/^[A-Za-z0-9-]{1,20}$/.test(code)) return path;
-  return `${path}?code=${code}`;
+  // Authenticated: pass user info to layout
+  const requestHeaders = new Headers(req.headers);
+  requestHeaders.set("x-pathname", rawPath);
+  requestHeaders.set("x-user-id", token.sub || "");
+  requestHeaders.set("x-user-email", token.email || "");
+  requestHeaders.set("x-user-name", token.name || "");
+  requestHeaders.set("x-user-role", (token as any).role || "user");
+  
+  return NextResponse.next({
+    request: { headers: requestHeaders },
+  });
 }
 
-export const config = {
-  matcher: ["/((?!api/auth|_next/static|_next/image|favicon.ico|.*\\..*).*)"],
-};
+export default middleware;

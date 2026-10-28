@@ -170,3 +170,23 @@ export async function requireAdmin(): Promise<SessionAppUser> {
 export async function requireSuperAdmin(): Promise<SessionAppUser> {
   return requireRole("super_admin");
 }
+
+/**
+ * Check if the current request is in demo mode.
+ * Demo mode is enabled via ?demo=true query param or ziggy-demo-mode cookie.
+ * This works in Server Components (uses cookies() from next/headers).
+ */
+export async function isDemoMode(): Promise<boolean> {
+  const cookieStore = await cookies();
+  return cookieStore.get("ziggy-demo-mode")?.value === "true";
+}
+
+/**
+ * Check if the current request is in demo mode (synchronous version for use in Server Components
+ * where cookies are already available via context).
+ * Note: In Server Components, cookies() is async. Use isDemoMode() for async context.
+ * This sync version is provided for cases where cookies are passed in.
+ */
+export function isDemoModeSync(cookies: { get: (name: string) => { value: string } | undefined }): boolean {
+  return cookies.get("ziggy-demo-mode")?.value === "true";
+}

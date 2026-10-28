@@ -19,6 +19,30 @@ import { loadOwnAgents } from "@/lib/dashboard-overview";
 import { pointTotals } from "@/lib/points/leaderboard";
 import { getPlatformRewardConfig } from "@/lib/points/platform-rewards";
 import { TARGET_POINTS } from "@/lib/points/rules";
+import { ZiggyLayoutWrapper } from "@/components/ziggy";
+import type { DashboardAgent } from "@/lib/dashboard-overview";
+import { cookies } from "next/headers";
+
+/**
+ * Demo paths that are accessible without authentication (public demo mode)
+ */
+const DEMO_PATHS = [
+  "/dashboard",
+  "/settings",
+  "/settings/agents",
+  "/escalations",
+  "/feed",
+  "/workers",
+  "/leaderboard",
+  "/projects",
+  "/notifications",
+  "/team",
+  "/docs",
+];
+
+function isDemoPath(pathWithoutBase: string): boolean {
+  return DEMO_PATHS.some((p) => pathWithoutBase === p || pathWithoutBase.startsWith(p + "/"));
+}
 
 export default async function AppLayout({
   children,
@@ -26,11 +50,23 @@ export default async function AppLayout({
   children: React.ReactNode;
 }) {
   const session = await auth();
+  const cookieStore = await cookies();
+  const headersList = await headers();
+  
+  // Get path from middleware header OR from cookie OR from URL
+  const pathFromHeader = headersList.get("x-pathname") || "";
+  const demoCookie = cookieStore.get("ziggy-demo-mode")?.value === "true";
+  const demoModeFromCookie = demoCookie;
+  
+  // Check if current request path is a demo path (first request won't have cookie)
+  const pathWithoutBase = pathFromHeader || "";
+  const demoModeFromPath = isDemoPath(pathWithoutBase);
+  const demoMode = demoModeFromCookie || demoModeFromPath;
 
   // Link-preview crawlers may reach /bugs/[id] without a session. Render a
   // minimal shell so generateMetadata + the public preview body can respond.
-  if (!session?.user) {
-    const ua = (await headers()).get("user-agent");
+  if (!session?.user && !demoMode) {
+    const ua = headersList.get("user-agent");
     if (isLinkPreviewBot(ua)) {
       return (
         <div className="flex min-h-screen flex-col bg-background">
@@ -45,73 +81,82 @@ export default async function AppLayout({
     }
   }
 
-  const user = await requireUser();
-  // The header lists this person's workspaces. Pages still resolve the active
-  // project inside the current workspace, so a foreign project id is ignored.
+  // Demo mode: skip auth, use demo data
+  let user: { id: string; name?: string | null; email?: string | null; image?: string | null; role: "user" | "admin" | "super_admin"; isRealSuperAdmin?: boolean; isRealAdmin?: boolean } | null = null;
   let workspaces: WorkspaceChoice[] = [];
   let activeTenantId: string | null = null;
   let tenantId: string | null = null;
-  try {
-    tenantId = await currentTenantIdFor(user.id);
-    activeTenantId = tenantId;
-    const memberships = await tenantsForUser(prisma, user.id, user.role);
-    workspaces = memberships
-      .filter((tenant) => tenant.archivedAt === null)
-      .map((tenant) => ({ id: tenant.id, name: tenant.name, slug: tenant.slug }));
-  } catch (error) {
-    console.error("[layout] workspace context failed", error);
-  }
-  // A missing Notification table must not take down every signed-in page.
   let unreadCount = 0;
-  try {
-    // Cached per user and expired by every write that changes it (#317), so
-    // ordinary navigation doesn't pay for a count query.
-    unreadCount = await getUnreadCount(user.id);
-  } catch (error) {
-    console.error("[layout] notification count failed", error);
-  }
-
   let pendingEscalationsCount = 0;
   let points = 0;
   let solvedTasks = 0;
   let shellAgents: { id: string; name: string; level: string }[] = [];
   let targetPoints = TARGET_POINTS;
-  try {
-    targetPoints = (await getPlatformRewardConfig(prisma)).target;
-  } catch (error) {
-    console.error("[layout] platform rewards failed", error);
-  }
-  if (tenantId) {
-    try {
-      pendingEscalationsCount = await countPendingEscalations(user.id, tenantId);
-    } catch (error) {
-      console.error("[layout] pending escalations count failed", error);
-    }
-    try {
-      const totals = await pointTotals(prisma, tenantId, user.id);
-      points = totals.points;
-      solvedTasks = totals.solvedTasks;
-    } catch (error) {
-      console.error("[layout] points failed", error);
-    }
-    try {
-      const agents = await loadOwnAgents({ userId: user.id, tenantId });
-      shellAgents = agents.map((agent) => ({ id: agent.id, name: agent.name, level: agent.level }));
-    } catch (error) {
-      console.error("[layout] agents failed", error);
-    }
-  }
-
-  // #287: one primary-key read; a failure leaves shortcuts on, the default.
   let shortcutsEnabled = true;
-  try {
-    const prefs = await prisma.user.findUnique({
-      where: { id: user.id },
-      select: { keyboardShortcuts: true },
-    });
-    shortcutsEnabled = prefs?.keyboardShortcuts ?? true;
-  } catch (error) {
-    console.error("[layout] shortcut setting failed", error);
+
+  if (!demoMode) {
+    // Real authenticated user flow
+    user = await requireUser();
+    try {
+      tenantId = await currentTenantIdFor(user.id);
+      activeTenantId = tenantId;
+      const memberships = await tenantsForUser(prisma, user.id, user.role);
+      workspaces = memberships
+        .filter((tenant) => tenant.archivedAt === null)
+        .map((tenant) => ({ id: tenant.id, name: tenant.name, slug: tenant.slug }));
+    } catch (error) {
+      console.error("[layout] workspace context failed", error);
+    }
+    try {
+      unreadCount = await getUnreadCount(user.id);
+    } catch (error) {
+      console.error("[layout] notification count failed", error);
+    }
+    if (tenantId) {
+      try {
+        pendingEscalationsCount = await countPendingEscalations(user.id, tenantId);
+      } catch (error) {
+        console.error("[layout] pending escalations count failed", error);
+      }
+      try {
+        const totals = await pointTotals(prisma, tenantId, user.id);
+        points = totals.points;
+        solvedTasks = totals.solvedTasks;
+      } catch (error) {
+        console.error("[layout] points failed", error);
+      }
+      try {
+        const agents = await loadOwnAgents({ userId: user.id, tenantId });
+        shellAgents = agents.map((agent) => ({ id: agent.id, name: agent.name, level: agent.level }));
+      } catch (error) {
+        console.error("[layout] agents failed", error);
+      }
+    }
+    try {
+      targetPoints = (await getPlatformRewardConfig(prisma)).target;
+    } catch (error) {
+      console.error("[layout] platform rewards failed", error);
+    }
+    try {
+      const prefs = await prisma.user.findUnique({
+        where: { id: user.id },
+        select: { keyboardShortcuts: true },
+      });
+      shortcutsEnabled = prefs?.keyboardShortcuts ?? true;
+    } catch (error) {
+      console.error("[layout] shortcut setting failed", error);
+    }
+  } else {
+    // Demo mode: provide demo user data
+    user = {
+      id: "demo-user",
+      name: "Demo User",
+      email: "demo@ziki.dev",
+      image: null,
+      role: "user",
+      isRealSuperAdmin: false,
+      isRealAdmin: false,
+    };
   }
 
   return (
@@ -120,14 +165,14 @@ export default async function AppLayout({
       <SkipLink />
       <div className="flex min-w-0 flex-1 flex-col">
         <AppHeader
-          userName={user.name ?? user.email}
-          userImage={user.image}
-          role={user.role}
-          isRealSuperAdmin={user.isRealSuperAdmin}
-          isRealAdmin={user.isRealAdmin}
+          userName={user?.name ?? user?.email ?? "Demo User"}
+          userImage={user?.image}
+          role={user?.role ?? "user"}
+          isRealSuperAdmin={user?.isRealSuperAdmin ?? false}
+          isRealAdmin={user?.isRealAdmin ?? false}
           unreadCount={unreadCount}
           pendingEscalationsCount={pendingEscalationsCount}
-          userId={user.id}
+          userId={user?.id ?? "demo-user"}
           workspaces={workspaces}
           activeTenantId={activeTenantId}
           points={points}
@@ -144,14 +189,24 @@ export default async function AppLayout({
           // Below lg the bottom nav strip covers the last ~4.5rem of the screen.
           className={`${PAGE_CONTAINER_CLASS} min-w-0 flex-1 overflow-x-clip py-6 outline-none max-lg:pb-28 max-sm:px-2 max-sm:pt-2.5 sm:px-6 sm:py-8 max-lg:sm:pb-28`}
         >
-          {children}
+          <ZiggyLayoutWrapper
+            initialAgents={shellAgents as DashboardAgent[]}
+            initialPendingEscalations={pendingEscalationsCount}
+            isDemoMode={demoMode}
+          >
+            {children}
+          </ZiggyLayoutWrapper>
         </main>
       </div>
-      <FocusMainOnNavigate />
-      <KeyboardShortcuts
-        enabled={shortcutsEnabled}
-        dashboard={isAdmin(user.role)}
-      />
+      {!demoMode && (
+        <>
+          <FocusMainOnNavigate />
+          <KeyboardShortcuts
+            enabled={shortcutsEnabled}
+            dashboard={isAdmin(user?.role ?? "user")}
+          />
+        </>
+      )}
     </div>
   );
 }

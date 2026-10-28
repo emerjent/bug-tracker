@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { BASE_PATH } from "@/lib/base-path";
 import { RelativeTime } from "@/components/relative-time";
@@ -34,6 +34,33 @@ const statusMeta: Record<
   offline: { label: "Offline", dot: "bg-zk-muted", text: "text-zk-muted" },
 };
 
+/** Closes a popover on outside click or Escape, returning focus to its trigger. */
+function useDismiss(
+  open: boolean,
+  close: () => void,
+  containerRef: React.RefObject<HTMLElement | null>,
+  triggerRef: React.RefObject<HTMLElement | null>,
+) {
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) close();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        close();
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("pointerdown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, close, containerRef, triggerRef]);
+}
+
 export function DashboardAgents({
   initial,
 }: {
@@ -41,6 +68,11 @@ export function DashboardAgents({
 }) {
   const [agents, setAgents] = useState(initial);
   const [open, setOpen] = useState(true);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpContainerRef = useRef<HTMLDivElement>(null);
+  const helpTriggerRef = useRef<HTMLButtonElement>(null);
+
+  useDismiss(helpOpen, () => setHelpOpen(false), helpContainerRef, helpTriggerRef);
 
   // Section-only refresh: the cards above are not re-fetched, so the page
   // never jumps while someone is reading it.
@@ -88,25 +120,94 @@ export function DashboardAgents({
             {agents.length}
           </span>
         </div>
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-controls="agents-body"
-          aria-label="Toggle Your agents section"
-          onClick={() => setOpen((value) => !value)}
-          className="rounded-full p-2 text-zk-muted transition hover:bg-zk-tint hover:text-zk-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-electric-blue focus-visible:ring-offset-2"
-        >
-          <svg
-            className={`h-5 w-5 transition-transform motion-safe:duration-200 ${open ? "rotate-180" : ""}`}
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-            aria-hidden="true"
+        <div className="flex items-center gap-1.5">
+          <div ref={helpContainerRef} className="relative">
+            <button
+              ref={helpTriggerRef}
+              type="button"
+              aria-expanded={helpOpen}
+              aria-haspopup="dialog"
+              aria-label="Understand agent statuses"
+              onClick={() => setHelpOpen((value) => !value)}
+              className="rounded-full p-2 text-zk-muted transition hover:bg-zk-tint hover:text-zk-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-electric-blue focus-visible:ring-offset-2"
+            >
+              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v4M12 17h.01" />
+              </svg>
+            </button>
+            {helpOpen ? (
+              <div
+                role="dialog"
+                aria-label="Agent status meanings"
+                className="absolute top-full z-50 mt-1.5 w-80 rounded-[20px] border border-zk-border bg-zk-surface p-4 text-sm shadow-[0_16px_40px_rgba(11,23,51,0.16)] right-0"
+              >
+                <div className="flex items-center justify-between border-b border-zk-divider pb-2">
+                  <span className="font-bold text-zk-text">Agent statuses</span>
+                  <button
+                    type="button"
+                    onClick={() => setHelpOpen(false)}
+                    className="inline-flex h-6 w-6 items-center justify-center rounded text-zk-muted hover:bg-slate-100 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-600"
+                    aria-label="Close"
+                  >
+                    <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                      <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="mt-3 space-y-3 text-zk-text2">
+                  <div>
+                    <p className="flex items-center gap-2 font-medium text-zk-info-fg">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-sky-tint" aria-hidden="true" />
+                      <span>Waiting on you</span>
+                    </p>
+                    <p className="mt-1 ml-7 text-xs">The agent asked you a question. <Link href="/escalations" className="font-semibold text-zk-accent hover:underline" onClick={() => setHelpOpen(false)}>Go to Agent Escalations</Link> to answer it.</p>
+                  </div>
+                  <div>
+                    <p className="flex items-center gap-2 font-medium text-zk-warn-fg">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-zk-warn-fg" aria-hidden="true" />
+                      <span>Working</span>
+                    </p>
+                    <p className="mt-1 ml-7 text-xs">The agent is actively working on an issue (has a live claim with recent activity).</p>
+                  </div>
+                  <div>
+                    <p className="flex items-center gap-2 font-medium text-zk-ok-fg">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-zk-ok-fg" aria-hidden="true" />
+                      <span>Idle</span>
+                    </p>
+                    <p className="mt-1 ml-7 text-xs">The agent was seen recently (within 24 hours) but has no active work.</p>
+                  </div>
+                  <div>
+                    <p className="flex items-center gap-2 font-medium text-zk-muted">
+                      <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-zk-muted" aria-hidden="true" />
+                      <span>Offline</span>
+                    </p>
+                    <p className="mt-1 ml-7 text-xs">The agent hasn't checked in for 24+ hours. Verify it's still running.</p>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-controls="agents-body"
+            aria-label="Toggle Your agents section"
+            onClick={() => setOpen((value) => !value)}
+            className="rounded-full p-2 text-zk-muted transition hover:bg-zk-tint hover:text-zk-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-electric-blue focus-visible:ring-offset-2"
           >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-          </svg>
-        </button>
+            <svg
+              className={`h-5 w-5 transition-transform motion-safe:duration-200 ${open ? "rotate-180" : ""}`}
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+              aria-hidden="true"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {open ? (
