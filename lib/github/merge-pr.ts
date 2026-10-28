@@ -162,7 +162,7 @@ export function normalizePrivateKey(raw: string): string {
     k = k.replace(/\\r/g, "\r");
   }
   // If newlines inside the PEM body were stripped or collapsed into spaces, reformat it into standard PEM lines
-  const pemMatch = k.match(/-----BEGIN ([A-Z ]+)-----(.+?)-----END \1-----/s);
+  const pemMatch = k.match(/-----BEGIN ([A-Z ]+)-----([\s\S]+?)-----END \1-----/);
   if (pemMatch) {
     const header = `-----BEGIN ${pemMatch[1]}-----`;
     const footer = `-----END ${pemMatch[1]}-----`;
