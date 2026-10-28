@@ -74,7 +74,8 @@ export function AgentControls({
   const [savedUntil, setSavedUntil] = useState<string | null>(initialUntilIso);
   const [expiryChoice, setExpiryChoice] = useState<BurstExpiryChoice>(initialUntilIso ? "keep" : "none");
   const [customUntil, setCustomUntil] = useState("");
-  const [projectId, setProjectId] = useState(currentProjectId || projects[0]?.id || "");
+  // A regenerated key stays on the project the current key is limited to.
+  const projectId = currentProjectId || projects[0]?.id || "";
   const [issued, setIssued] = useState<{ rawKey: string; prefix: string } | null>(null);
   const [pending, startTransition] = useTransition();
 
@@ -238,22 +239,6 @@ export function AgentControls({
           {[...new Set([current, ...levels])].map((option) => (
             <option key={option} value={option} disabled={!levels.includes(option)}>
               {AGENT_LEVEL_LABELS[option]}
-            </option>
-          ))}
-        </Select>
-        <label htmlFor={`project-${agentId}`} className="sr-only">
-          Project for the new key
-        </label>
-        <Select
-          id={`project-${agentId}`}
-          value={projectId}
-          disabled={pending || projects.length === 0}
-          onChange={(event) => setProjectId(event.target.value)}
-          className={`${agentsInputClass} w-auto min-w-[8rem]`}
-        >
-          {projects.map((project) => (
-            <option key={project.id} value={project.id}>
-              {project.name}
             </option>
           ))}
         </Select>

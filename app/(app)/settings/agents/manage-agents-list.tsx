@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import type { AgentLevel } from "@prisma/client";
-import { AGENT_LEVEL_LABELS, AGENT_LEVELS } from "@/lib/agents/levels";
+import { AGENT_LEVEL_LABELS } from "@/lib/agents/levels";
 import { LocalTime } from "@/components/local-time";
 import { RelativeTime } from "@/components/relative-time";
 import { AgentControls } from "./agent-controls";
@@ -59,11 +59,6 @@ export function ManageAgentsList({
 }) {
   const [query, setQuery] = useState("");
 
-  const covered = useMemo(() => {
-    const set = new Set(agents.filter((a) => !a.revokedAt).map((a) => a.level));
-    return AGENT_LEVELS.map((level) => ({ level, on: set.has(level) }));
-  }, [agents]);
-
   const visible = agents.filter((agent) => {
     if (!query.trim()) return true;
     const q = query.trim().toLowerCase();
@@ -94,23 +89,6 @@ export function ManageAgentsList({
               className="h-full rounded-full bg-electric-blue-strong transition-[width] duration-300"
               style={{ width: `${meterPct}%` }}
             />
-          </div>
-        </div>
-        <div className={`${agentsSurface} p-4`}>
-          <p className="text-xs font-bold uppercase tracking-[0.06em] text-zk-muted">Roles covered</p>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {covered.map(({ level, on }) => (
-              <span
-                key={level}
-                className={
-                  on
-                    ? levelBadgeClass(level)
-                    : "inline-flex items-center rounded-full border border-dashed border-zk-border px-2.5 py-0.5 text-xs font-bold text-zk-muted"
-                }
-              >
-                {AGENT_LEVEL_LABELS[level]}
-              </span>
-            ))}
           </div>
         </div>
       </div>
