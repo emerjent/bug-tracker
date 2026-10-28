@@ -138,6 +138,29 @@ describe("createAppJwt (#452)", () => {
     verifier.end();
     expect(verifier.verify(publicKey, Buffer.from(signature, "base64url"))).toBe(true);
   });
+
+  it("handles base64, collapsed spaces, and escaped newlines in private key", () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs1", format: "pem" }).toString();
+
+    // Base64-encoded PEM
+    const b64 = Buffer.from(pem).toString("base64");
+    expect(() => createAppJwt("123", b64)).not.toThrow();
+
+    // Collapsed spaces on a single line
+    const singleLine = pem.replace(/\r?\n/g, " ");
+    expect(() => createAppJwt("123", singleLine)).not.toThrow();
+
+    // Literal escaped newlines
+    const escaped = pem.replace(/\n/g, "\\n");
+    expect(() => createAppJwt("123", escaped)).not.toThrow();
+  });
+
+  it("throws helpful error when key is missing PEM header", () => {
+    expect(() => createAppJwt("123", "some-random-client-secret-value")).toThrow(
+      /missing the '-----BEGIN \.\.\. PRIVATE KEY-----' header/
+    );
+  });
 });
 
 describe("mergeAcceptedFix gates (#452)", () => {
@@ -613,6 +636,23 @@ describe("mergePullRequest pins the head SHA and picks an allowed method (#492)"
     expect(result.merged).toBe(true);
     const mergeCall = fetchMock.mock.calls.find((call) => String(call[0]) === mergeUrl);
     expect(JSON.parse(String(mergeCall![1]?.body))).toEqual({ merge_method: "merge", sha: "verified-sha" });
+  });
+
+  it("falls back to squash when repo settings omit merge methods (non-admin integration caller)", async () => {
+    const fetchMock = stubFetch((url, init) => {
+      const token = tokenRoute(url);
+      if (token) return token;
+      // When caller lacks repo admin permission, GitHub returns 200 with these fields undefined
+      if (url === repoUrl && !init?.method) return jsonResponse({});
+      if (url === mergeUrl) return jsonResponse({ merged: true, sha: "merge-sha" });
+      return jsonResponse({}, false);
+    });
+
+    const result = await createInstallationClient("123", env).mergePullRequest(ref, "verified-sha");
+
+    expect(result.merged).toBe(true);
+    const mergeCall = fetchMock.mock.calls.find((call) => String(call[0]) === mergeUrl);
+    expect(JSON.parse(String(mergeCall![1]?.body))).toEqual({ merge_method: "squash", sha: "verified-sha" });
   });
 
   it("refuses to guess when the repository allows no merge method at all", async () => {

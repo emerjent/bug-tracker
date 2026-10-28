@@ -89,6 +89,8 @@ export type MergePullResult = {
   conflict?: boolean;
   /** The repository allows no merge method the app can use. */
   noAllowedMethod?: boolean;
+  /** Detailed error message from GitHub API response if available. */
+  message?: string;
 };
 
 export interface GitHubClient {
@@ -136,6 +138,43 @@ function base64url(input: Buffer | string): string {
   return Buffer.from(input).toString("base64url");
 }
 
+export function normalizePrivateKey(raw: string): string {
+  let k = raw.trim();
+  if (
+    (k.startsWith('"') && k.endsWith('"')) ||
+    (k.startsWith("'") && k.endsWith("'"))
+  ) {
+    k = k.slice(1, -1).trim();
+  }
+  // If base64 encoded PEM, decode it
+  if (!k.includes("-----BEGIN") && /^[A-Za-z0-9+/=\s]+$/.test(k)) {
+    try {
+      const decoded = Buffer.from(k, "base64").toString("utf8");
+      if (decoded.includes("-----BEGIN")) {
+        k = decoded;
+      }
+    } catch {
+      // not valid base64
+    }
+  }
+  if (k.includes("\\n")) {
+    k = k.replace(/\\n/g, "\n");
+  }
+  if (k.includes("\\r")) {
+    k = k.replace(/\\r/g, "\r");
+  }
+  // If newlines inside the PEM body were stripped or collapsed into spaces, reformat it into standard PEM lines
+  const pemMatch = k.match(/-----BEGIN ([A-Z ]+)-----([\s\S]+?)-----END \1-----/);
+  if (pemMatch) {
+    const header = `-----BEGIN ${pemMatch[1]}-----`;
+    const footer = `-----END ${pemMatch[1]}-----`;
+    const body = pemMatch[2].replace(/\s+/g, "");
+    const formattedBody = body.match(/.{1,64}/g)?.join("\n") || body;
+    k = `${header}\n${formattedBody}\n${footer}\n`;
+  }
+  return k;
+}
+
 /**
  * Sign the short-lived app JWT GitHub wants when minting an installation
  * token: RS256, `iss` is the app id, and it may live at most 10 minutes.
@@ -148,7 +187,18 @@ export function createAppJwt(appId: string, privateKey: string, now: number = Da
   const signer = createSign("RSA-SHA256");
   signer.update(signingInput);
   signer.end();
-  const signature = signer.sign(privateKey);
+  const keyToSign = normalizePrivateKey(privateKey);
+  if (!keyToSign.includes("-----BEGIN")) {
+    throw new GitHubError(
+      `GitHub App private key signing failed: The configured key is ${privateKey.trim().length} characters long and is missing the '-----BEGIN ... PRIVATE KEY-----' header. Ensure GITHUB_APP_PRIVATE_KEY contains the contents of the downloaded .pem file, not the GitHub App Client Secret.`
+    );
+  }
+  let signature: Buffer;
+  try {
+    signature = signer.sign(keyToSign);
+  } catch (err) {
+    throw new GitHubError(`GitHub App private key signing failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
   return `${signingInput}.${signature.toString("base64url")}`;
 }
 
@@ -175,7 +225,11 @@ export function createInstallationClient(
         "user-agent": "ziki-issues",
       },
     });
-    if (!response.ok) throw new GitHubError("Could not mint an installation token.");
+    if (!response.ok) {
+      const errBody = (await response.json().catch(() => null)) as { message?: string } | null;
+      const detail = errBody?.message ? `: ${errBody.message}` : ` (HTTP ${response.status})`;
+      throw new GitHubError(`Could not mint an installation token${detail}.`);
+    }
     const body = (await response.json()) as { token?: string };
     if (!body.token) throw new GitHubError("GitHub returned no installation token.");
     token = body.token;
@@ -198,7 +252,11 @@ export function createInstallationClient(
   return {
     async getPullRequest(ref) {
       const response = await request(`/repos/${ref.owner}/${ref.repo}/pulls/${ref.number}`);
-      if (!response.ok) throw new GitHubError("Could not read the pull request.");
+      if (!response.ok) {
+        const errBody = (await response.json().catch(() => null)) as { message?: string } | null;
+        const detail = errBody?.message ? `: ${errBody.message}` : ` (HTTP ${response.status})`;
+        throw new GitHubError(`Could not read the pull request${detail}.`);
+      }
       const body = (await response.json()) as {
         state?: string;
         merged?: boolean;
@@ -266,13 +324,19 @@ export function createInstallationClient(
           allow_merge_commit?: boolean;
           allow_rebase_merge?: boolean;
         };
-        method = body.allow_squash_merge
-          ? "squash"
-          : body.allow_merge_commit
-            ? "merge"
-            : body.allow_rebase_merge
-              ? "rebase"
-              : null;
+        const hasKnownSettings =
+          typeof body.allow_squash_merge === "boolean" ||
+          typeof body.allow_merge_commit === "boolean" ||
+          typeof body.allow_rebase_merge === "boolean";
+        if (hasKnownSettings) {
+          method = body.allow_squash_merge
+            ? "squash"
+            : body.allow_merge_commit
+              ? "merge"
+              : body.allow_rebase_merge
+                ? "rebase"
+                : null;
+        }
       }
       if (!method) return { merged: false, noAllowedMethod: true };
       // Pinning `sha` (#492): GitHub then refuses with 409 when the head has
@@ -281,10 +345,11 @@ export function createInstallationClient(
         method: "PUT",
         body: JSON.stringify({ merge_method: method, sha: headSha }),
       });
-      if (response.status === 403) return { merged: false, forbidden: true };
-      if (response.status === 405) return { merged: false, noAllowedMethod: true };
-      if (response.status === 409) return { merged: false, conflict: true };
-      if (!response.ok) return { merged: false };
+      const errBody = !response.ok ? ((await response.json().catch(() => null)) as { message?: string } | null) : null;
+      if (response.status === 403) return { merged: false, forbidden: true, message: errBody?.message };
+      if (response.status === 405) return { merged: false, noAllowedMethod: true, message: errBody?.message };
+      if (response.status === 409) return { merged: false, conflict: true, message: errBody?.message };
+      if (!response.ok) return { merged: false, message: errBody?.message };
       const body = (await response.json()) as { merged?: boolean; sha?: string };
       return { merged: !!body.merged, sha: body.sha };
     },
@@ -570,9 +635,11 @@ export async function mergeAcceptedFix(
   let pullRequest: PullRequest;
   try {
     pullRequest = await client.getPullRequest(ref);
-  } catch {
-    await recordMergeFailure(agent, bug, "GitHub could not be reached.", db);
-    return fail(409, "merge_failed", "GitHub could not be reached.");
+  } catch (error) {
+    const detail = error instanceof Error && error.message ? error.message : "GitHub could not be reached.";
+    const message = detail.startsWith("GitHub could not be reached") ? detail : `GitHub could not be reached: ${detail}`;
+    await recordMergeFailure(agent, bug, message, db);
+    return fail(409, "merge_failed", message);
   }
 
   // Gate 2a (#642): a pull request closed without merging cannot be merged.
