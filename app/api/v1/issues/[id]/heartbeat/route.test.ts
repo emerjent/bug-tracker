@@ -12,6 +12,7 @@ const db = vi.hoisted(() => ({
   agentAuditEvent: { create: vi.fn() },
   project: { findFirst: vi.fn() },
   issueClaim: { findFirst: vi.fn(), update: vi.fn() },
+  agentPresence: { upsert: vi.fn() },
   $queryRaw: vi.fn(),
   $transaction: vi.fn(),
 }));
@@ -53,6 +54,7 @@ beforeEach(() => {
   db.issueClaim.findFirst.mockResolvedValue({ id: "claim-a", agentId: "agent-a", status: "active" });
   db.issueClaim.update.mockResolvedValue({ id: "claim-a", lastHeartbeatAt: new Date() });
   db.$transaction.mockImplementation(async (run) => run(db));
+  db.agentPresence.upsert.mockResolvedValue({});
 });
 
 describe("POST /api/v1/issues/{id}/heartbeat (#556)", () => {

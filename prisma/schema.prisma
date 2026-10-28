@@ -247,6 +247,9 @@ model User {
   auditActions          AgentAuditEvent[]    @relation("AuditActorUser")
   agentQuestions        AgentQuestion[]
   agentMessagesSent     AgentMessage[]
+  decisionCardsOwned    DecisionCard[]   @relation("DecisionCardOwner")
+  decisionCardsAnswered DecisionCard[]   @relation("DecisionCardAnsweredBy")
+  verdictOutcomes       VerdictOutcome[]
   tenantInvitesSent     TenantInvite[]
   membershipChangesMade MembershipChange[] @relation("MembershipChangeActor")
   membershipChangesReceived MembershipChange[] @relation("MembershipChangeTarget")
@@ -373,6 +376,8 @@ model Bug {
   auditEvents       AgentAuditEvent[]
   goalAllocations   GoalAllocation[]
   mistakes          AgentMistake[]
+  decisionCards     DecisionCard[]
+  verdictOutcomes   VerdictOutcome[]
 
   /// #517: issue numbers are per tenant, so two tenants can both have a #1.
   @@unique([tenantId, number])
@@ -706,9 +711,18 @@ model ProjectArea {
 model AgentAreaPreference {
   agentId       String
   projectAreaId String
-  createdAt     DateTime    @default(now())
-  agent         Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  projectArea   ProjectArea @relation(fields: [projectAreaId], references: [id], onDelete: Cascade)
+  /// Autonomy dial step in this area: 0 suggest ... 4 auto_merge.
+  step             Int      @default(0)
+  /// Highest step earned in this area. Auto-merge (4) requires a streak of
+  /// upheld ✓ verdicts; Security caps at approval (2) unless a human raises it.
+  maxStep          Int      @default(0)
+  /// Streak of consecutive upheld positive verdicts in this area.
+  verdictStreak    Int      @default(0)
+  /// When the streak last changed.
+  streakChangedAt  DateTime @default(now())
+  createdAt        DateTime    @default(now())
+  agent            Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  projectArea      ProjectArea @relation(fields: [projectAreaId], references: [id], onDelete: Cascade)
 
   @@id([agentId, projectAreaId])
   @@index([projectAreaId])
@@ -892,6 +906,8 @@ model Agent {
   redesigns            RedesignProposal[]
   questions            AgentQuestion[]
   messages             AgentMessage[]
+  decisionCards        DecisionCard[]
+  presence             AgentPresence?
   idempotencyKeys      IdempotencyKey[]
   events               AgentEvent[]
   webhookSubscriptions WebhookSubscription[]
@@ -1120,6 +1136,7 @@ model TestVerdict {
   bug              Bug      @relation(fields: [bugId], references: [id], onDelete: Cascade)
   agent            Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
   onBehalfOf       User     @relation(fields: [onBehalfOfUserId], references: [id], onDelete: Cascade)
+  outcome          VerdictOutcome?
 
   @@unique([bugId, agentId])
   @@index([bugId])
@@ -1674,4 +1691,120 @@ enum MistakeCategory {
   mergeability
   architecture
   security
+}
+
+enum DecisionCardStatus {
+  open
+  answered
+  expired
+}
+
+/// An agent's question to its owner, in a fixed shape (#decision-cards).
+/// The agent proposes a question, two or three options, its recommendation
+/// and confidence, what it already tried, the cost so far, and a default
+/// answer on a timer. The timer turns "blocked forever" into "blocked at
+/// most N hours."
+model DecisionCard {
+  id            String               @id @default(cuid())
+  agentId       String
+  ownerUserId   String
+  bugId         String?
+  question      String
+  /// Two or three options, stored as JSON: [{ label, value }].
+  options       Json
+  /// The recommended option index (0-based), or null for none.
+  recommendation Int?
+  /// Confidence 0-100.
+  confidence    Int?
+  /// What the agent already tried before asking.
+  tried         String?
+  /// Cost so far (minutes spent, or credits), to help the owner weigh urgency.
+  costSoFar     Int?
+  /// The default answer applied when the timer expires.
+  defaultAnswer String?
+  /// Minutes before the default answer applies (default 240 = 4 hours).
+  defaultTimerMinutes Int         @default(240)
+  /// When the card expires and the default answer is applied.
+  expiresAt     DateTime?
+  status        DecisionCardStatus @default(open)
+  /// The owner's answer: the chosen option index/value, or free text.
+  answer        String?
+  answeredAt    DateTime?
+  answeredById  String?
+  answeredBy    User? @relation("DecisionCardAnsweredBy", fields: [answeredById], references: [id], onDelete: SetNull)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  agent         Agent              @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  owner         User               @relation("DecisionCardOwner", fields: [ownerUserId], references: [id], onDelete: Cascade)
+  bug           Bug?               @relation(fields: [bugId], references: [id], onDelete: SetNull)
+
+  @@index([agentId])
+  @@index([ownerUserId, status])
+  @@index([bugId])
+  @@index([expiresAt])
+}
+
+/// What an agent is doing right now, leased by heartbeat (#presence).
+/// Replaces Online/Offline with a claim-backed working state.
+enum AgentPresenceState {
+  claiming
+  planning
+  working
+  waiting_on_ci
+  blocked_on_you
+  idle
+}
+
+/// An agent's live presence, renewed by heartbeat. When the lease lapses the
+/// state falls back to Idle; a lapsed claim lease releases the issue back to Open.
+model AgentPresence {
+  id             String             @id @default(cuid())
+  agentId        String             @unique
+  state          AgentPresenceState @default(idle)
+  /// Human-readable detail, e.g. "Working on #400 (12 min)" or "Waiting on CI".
+  detail         String?
+  bugId          String?
+  /// Lease expiry; the heartbeat renews it. After it lapses the row stays but
+  /// the state is treated as lapsed/idle.
+  leaseExpiresAt DateTime
+  lastHeartbeatAt DateTime        @default(now())
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  agent          Agent            @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([leaseExpiresAt])
+}
+
+/// How much autonomy an agent has in one project area (#autonomy-dial).
+enum AutonomyStep {
+  suggest
+  draft
+  do_with_approval
+  do_and_report
+  auto_merge
+}
+
+/// A test verdict that was later reversed (#verdict-reason).
+/// Records whether a ✗ caught a real regression and whether a verdict held up.
+model VerdictOutcome {
+  id          String   @id @default(cuid())
+  testVerdictId String  @unique
+  /// The person the verdict was on behalf of.
+  userId      String
+  bugId       String
+  /// Whether this verdict's call held up (not later reversed).
+  heldUp      Boolean  @default(true)
+  /// Whether this ✗ caught a real regression later confirmed by a merge or fix.
+  caughtRegression Boolean @default(false)
+  /// Bonus points already paid for catching a regression (idempotent).
+  regressionPaid Boolean @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  testVerdict TestVerdict @relation(fields: [testVerdictId], references: [id], onDelete: Cascade)
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bug         Bug       @relation(fields: [bugId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([bugId])
+  @@index([heldUp])
 }

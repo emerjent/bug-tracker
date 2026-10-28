@@ -9,6 +9,7 @@ import { publish } from "@/lib/agent-api/events";
 import { notifyAgentQuestion, notifyClaimOffered } from "@/lib/agent-notifications";
 import { offerNext, scheduleOfferExpiry } from "@/lib/agent-api/offer";
 import { isDeliveryOverdue, isOwnerWaitOver, ownerWaitCapMinutes, OWNER_REMINDER_MINUTES } from "@/lib/claim-deadline";
+import { PRESENCE_LEASE_MINUTES } from "@/lib/agent-presence";
 import { workflowFor } from "@/lib/workflow";
 import { DEFAULT_PROJECT_WORKFLOW } from "@/lib/workflow-config";
 
@@ -61,7 +62,27 @@ export async function heartbeatClaim(agent: AgentContext, projectId: string, bug
     if (!claim) throw new IssueApiError(409, "This issue has no current claim.");
     if (claim.agentId !== agent.agentId) throw new IssueApiError(403, "Only the claiming agent can send a heartbeat.");
     if (claim.status !== "active") throw new IssueApiError(409, "Only active claims accept heartbeats.");
-    return tx.issueClaim.update({ where: { id: claim.id }, data: { lastHeartbeatAt: new Date() } });
+    const updated = await tx.issueClaim.update({ where: { id: claim.id }, data: { lastHeartbeatAt: new Date() } });
+    // Heartbeat renews the presence lease so a working agent stays "live."
+    await (tx as Prisma.TransactionClient).agentPresence.upsert({
+      where: { agentId: agent.agentId },
+      update: {
+        state: "working",
+        detail: null,
+        bugId,
+        leaseExpiresAt: new Date(Date.now() + PRESENCE_LEASE_MINUTES * 60_000),
+        lastHeartbeatAt: new Date(),
+      },
+      create: {
+        agentId: agent.agentId,
+        state: "working",
+        detail: null,
+        bugId,
+        leaseExpiresAt: new Date(Date.now() + PRESENCE_LEASE_MINUTES * 60_000),
+        lastHeartbeatAt: new Date(),
+      },
+    });
+    return updated;
   });
 }
 

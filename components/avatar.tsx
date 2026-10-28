@@ -26,6 +26,7 @@ export function Avatar({
   size = "sm",
   variant = "tone",
   className = "",
+  presence,
 }: {
   name?: string | null;
   image?: string | null;
@@ -37,8 +38,14 @@ export function Avatar({
    */
   variant?: "tone" | "solid";
   className?: string;
+  /**
+   * Live presence (#presence). When `live`, a ring is drawn around the avatar
+   * so the issue list shows who is working right now.
+   */
+  presence?: { live: boolean; state?: string | null } | null;
 }) {
   const src = safeAvatarUrl(image);
+  const live = presence?.live ?? false;
   return (
     <span
       aria-hidden="true"
@@ -64,6 +71,13 @@ export function Avatar({
           ref={hideIfAlreadyBroken}
         />
       ) : null}
+      {live && (
+        <span
+          className="absolute right-0 bottom-0 h-3 w-3 shrink-0 rounded-full border-2 border-zk-bg bg-emerald-500 ring-1 ring-zk-bg animate-pulse"
+          title={presence?.state ?? "live"}
+          aria-label={`live: ${presence?.state ?? "active"}`}
+        />
+      )}
     </span>
   );
 }

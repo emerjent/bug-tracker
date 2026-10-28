@@ -12,6 +12,7 @@ import { hasLevel } from "@/lib/agents/levels";
 import type { AgentContext } from "@/lib/agents/require-agent";
 import { publish } from "@/lib/agent-api/events";
 import { handleTestVerdictSubmitted } from "@/lib/agent-api/review-offer";
+import { ensureVerdictOutcome, markVerdictReversed } from "@/lib/points-verdict";
 
 /**
  * Reviewer agents reporting whether a fix is good to merge (#434). A verdict
@@ -35,8 +36,13 @@ import { handleTestVerdictSubmitted } from "@/lib/agent-api/review-offer";
 
 export const TEST_VERDICT_NOTES_MAX = 2000;
 
-export const testVerdictBodySchema = z.object({
+export const testVerdictBodySchemaBase = z.object({
   goodToMerge: z.boolean(),
+  /**
+   * A one-line note is required on every reject (#572). It becomes the retry
+   * brief the agent acts on with "Redo with this note". Accepted verdicts may
+   * still carry optional notes.
+   */
   notes: z.string().trim().max(TEST_VERDICT_NOTES_MAX).optional(),
   /** The person the agent acts for; defaults to its owner. */
   onBehalfOfUserId: z.string().trim().min(1).max(191).optional(),
@@ -50,6 +56,15 @@ export const testVerdictBodySchema = z.object({
     .regex(/^[0-9a-f]{7,64}$/i, "headSha must be a hexadecimal commit SHA.")
     .optional(),
 });
+
+/** A reject verdict must carry a one-line retry note (#572). */
+export const testVerdictBodySchema = testVerdictBodySchemaBase.refine(
+  (data) => data.goodToMerge || (data.notes ?? "").trim().length > 0,
+  {
+    message: "A one-line note is required when rejecting a fix.",
+    path: ["notes"],
+  },
+);
 
 export type TestVerdictBody = z.infer<typeof testVerdictBodySchema>;
 
@@ -255,6 +270,10 @@ export async function submitTestVerdict(
           bugId: bug.id,
         });
         await handleTestVerdictSubmitted(tx, { bugId: bug.id, agentId: agent.agentId, tenantId: bug.tenantId, pullRequestUrl }).catch(() => null);
+        // A ✓ that is taken back is a reversal: weight points by whether it held up.
+        if (existing.goodToMerge && !body.goodToMerge) {
+          void markVerdictReversed(verdict.id);
+        }
         return { status: 200 as const, verdict, changed: true as const };
       }
 
@@ -287,6 +306,7 @@ export async function submitTestVerdict(
       });
 
       await handleTestVerdictSubmitted(tx, { bugId: bug.id, agentId: agent.agentId, tenantId: bug.tenantId, pullRequestUrl }).catch(() => null);
+      void ensureVerdictOutcome(verdict.id, onBehalfOfUserId, bug.id);
       return { status: 201 as const, verdict };
     });
   } catch (error) {

@@ -15,9 +15,11 @@ type Row = {
 const state = vi.hoisted(() => ({ verdicts: [] as Row[] }));
 
 const db = vi.hoisted(() => ({
-  bug: { findFirst: vi.fn() },
+  bug: { findFirst: vi.fn(), findUnique: vi.fn() },
   membership: { findUnique: vi.fn() },
   testVerdict: { findFirst: vi.fn(), create: vi.fn(), update: vi.fn() },
+  verdictOutcome: { upsert: vi.fn(), update: vi.fn() },
+  pointEntry: { createMany: vi.fn() },
   agentAuditEvent: { create: vi.fn() },
   agentEvent: { create: vi.fn() },
   webhookSubscription: { findMany: vi.fn() },
@@ -58,6 +60,10 @@ beforeEach(() => {
   db.bug.findFirst.mockResolvedValue(bugRow());
   db.membership.findUnique.mockResolvedValue({ id: "m1" });
   db.agentEvent.create.mockResolvedValue({ id: "e1" });
+  db.verdictOutcome.upsert.mockResolvedValue({ id: "vo1", userId: "rob", bugId: "bug1" });
+  db.verdictOutcome.update.mockResolvedValue({ id: "vo1", userId: "rob", bugId: "bug1" });
+  db.bug.findUnique.mockResolvedValue({ tenantId: "tenant_zedu" });
+  db.pointEntry.createMany.mockResolvedValue({ count: 1 });
   db.webhookSubscription.findMany.mockResolvedValue([]);
   db.testVerdict.findFirst.mockImplementation(async ({ where }: { where: Record<string, string> }) => {
     // A copy, as Prisma returns: a later update mustn't change what was read.
@@ -232,7 +238,7 @@ describe("submitTestVerdict: changing a verdict (#529)", () => {
     db.agentEvent.create.mockResolvedValue({ id: "e2" });
     db.webhookSubscription.findMany.mockResolvedValue([]);
 
-    await submitTestVerdict(rob, "bug1", { goodToMerge: false });
+    await submitTestVerdict(rob, "bug1", { goodToMerge: false, notes: "Regresses the Safari login" });
 
     expect(db.testVerdict.create).not.toHaveBeenCalled();
     expect(db.agentAuditEvent.create.mock.calls[0][0].data).toMatchObject({
@@ -247,7 +253,7 @@ describe("submitTestVerdict: changing a verdict (#529)", () => {
 
   it("can't change once the fix is accepted", async () => {
     db.bug.findFirst.mockResolvedValue(bugRow({ status: "resolved" }));
-    expect(await submitTestVerdict(reviewer("r1", "rob"), "bug1", { goodToMerge: false })).toMatchObject({
+    expect(await submitTestVerdict(reviewer("r1", "rob"), "bug1", { goodToMerge: false, notes: "already resolved" })).toMatchObject({
       status: 409,
       error: "already_accepted",
     });

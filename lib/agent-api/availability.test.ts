@@ -3,7 +3,7 @@ import { NextRequest } from "next/server";
 
 const db = vi.hoisted(() => ({
   agentApiKey: { findUnique: vi.fn() }, agentAuditEvent: { create: vi.fn() },
-  agentEvent: { create: vi.fn() }, webhookSubscription: { findMany: vi.fn() },
+  agentEvent: { create: vi.fn() }, agentPresence: { upsert: vi.fn() }, webhookSubscription: { findMany: vi.fn() },
   webhookDelivery: { createMany: vi.fn() },
   project: { findFirst: vi.fn(), findUnique: vi.fn() },
   issueClaim: { findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn(), count: vi.fn(), create: vi.fn(), groupBy: vi.fn() },
@@ -57,6 +57,7 @@ beforeEach(() => {
   mocks.budget.mockResolvedValue({ allowed: true });
   mocks.workflow.mockResolvedValue(DEFAULT_PROJECT_WORKFLOW);
   mocks.demote.mockResolvedValue({ ok: true, changed: false, releases: 1 });
+  db.agentPresence.upsert.mockResolvedValue({});
 });
 afterEach(() => vi.useRealTimers());
 
