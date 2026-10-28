@@ -43,10 +43,15 @@ export const metadata = { title: "My agents" };
 /** Where "Create agent" goes. Creating an agent is its own page (built under a separate ticket), so this page only links to it. */
 const CREATE_AGENT_HREF = "/settings/agents/connect";
 
-/** Check if we're in demo mode via middleware header. */
+/** Check if we're in demo mode via middleware header or build time. */
 async function isDemoMode(): Promise<boolean> {
-  const headersList = await headers();
-  return headersList.get("x-demo-mode") === "true";
+  try {
+    const headersList = await headers();
+    return headersList.get("x-demo-mode") === "true";
+  } catch {
+    // During build/SSG, headers() throws - treat as demo mode
+    return true;
+  }
 }
 
 /** Demo agent data for the manage agents list when in demo mode. */
