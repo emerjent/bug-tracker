@@ -4,12 +4,17 @@ import { requireUser } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { isAgentPlatformEnabled } from "@/lib/feature-flags";
 import { AGENT_INSTRUCTIONS_MAX, AGENT_MESSAGE_MAX, listAgentThread } from "@/lib/agent-messages";
+import { auditWhere } from "@/lib/agent-audit/visibility";
 import { currentTenantIdFor } from "@/lib/tenant-context";
 import { LocalTime } from "@/components/local-time";
 import { InstructionsForm, SendMessageForm } from "./message-forms";
+import { AgentActivity, AgentProfileCard, type AgentActivityItem, type AgentProfileData } from "./agent-profile";
 import { agentsLink, agentsMutedClass, agentsSurface } from "@/app/(app)/settings/agents/agents-ui";
 
 export const metadata = { title: "Agent" };
+
+/** How many recent actions the profile lists. */
+const ACTIVITY_LIMIT = 20;
 
 /** The name as it arrived, and decoded in case it arrived still encoded. */
 function nameCandidates(raw: string): string[] {
@@ -46,7 +51,83 @@ async function findAgentIdByName(viewerId: string, rawName: string): Promise<str
   return teammates?.id ?? null;
 }
 
-/** One agent's page, at /settings/agent/{name}: its instructions and conversation. */
+/**
+ * The agent's profile and latest activity. Call it only after the viewer has
+ * passed listAgentThread's check (owner or team admin), the same people the
+ * audit log shows this agent's actions to.
+ */
+async function loadAgentProfile(
+  agentId: string,
+  viewerId: string,
+): Promise<{ agent: AgentProfileData; activity: AgentActivityItem[] } | null> {
+  const agent = await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      id: true,
+      tenantId: true,
+      name: true,
+      model: true,
+      level: true,
+      revokedAt: true,
+      createdAt: true,
+      ownerUserId: true,
+      owner: { select: { name: true, email: true } },
+      apiKeys: { select: { lastUsedAt: true, revokedAt: true, project: { select: { name: true } } } },
+    },
+  });
+  if (!agent) return null;
+
+  const [filed, claims, comments, events] = await Promise.all([
+    prisma.bug.count({ where: { createdByAgentId: agentId } }),
+    prisma.issueClaim.count({ where: { agentId } }),
+    prisma.comment.count({ where: { agentId } }),
+    prisma.agentAuditEvent.findMany({
+      where: auditWhere({ kind: "own-agents", tenantId: agent.tenantId, agentIds: [agentId] }, { agentId }),
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: ACTIVITY_LIMIT,
+      select: {
+        id: true,
+        createdAt: true,
+        action: true,
+        target: true,
+        undoneAt: true,
+        bug: { select: { id: true, number: true, title: true } },
+      },
+    }),
+  ]);
+
+  const lastUsed = agent.apiKeys
+    .map((key) => key.lastUsedAt?.getTime() ?? 0)
+    .reduce((latest, time) => Math.max(latest, time), 0);
+  const projects = [
+    ...new Set(agent.apiKeys.filter((key) => !key.revokedAt && key.project).map((key) => key.project!.name)),
+  ];
+
+  return {
+    agent: {
+      id: agent.id,
+      name: agent.name,
+      model: agent.model,
+      level: agent.level,
+      revokedAt: agent.revokedAt,
+      createdAt: agent.createdAt,
+      ownerName: agent.ownerUserId === viewerId ? null : (agent.owner.name ?? agent.owner.email),
+      lastActiveAt: lastUsed ? new Date(lastUsed) : null,
+      projects,
+      counts: { filed, claims, comments },
+    },
+    activity: events.map((event) => ({
+      id: event.id,
+      createdAt: event.createdAt,
+      action: event.action,
+      target: event.target,
+      bug: event.bug,
+      undone: event.undoneAt !== null,
+    })),
+  };
+}
+
+/** One agent's page, at /settings/agent/{name}: profile, activity, instructions and conversation. */
 export default async function AgentPage({ params }: { params: Promise<{ name: string }> }) {
   if (!isAgentPlatformEnabled()) notFound();
   const user = await requireUser();
@@ -55,21 +136,23 @@ export default async function AgentPage({ params }: { params: Promise<{ name: st
   if (!agentId) notFound();
   const thread = await listAgentThread(user, agentId);
   if (!thread) notFound();
+  const profile = await loadAgentProfile(agentId, user.id);
+  if (!profile) notFound();
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
-      <div className="space-y-1">
-        <Link href="/agents" className={`text-sm ${agentsLink}`}>
-          ← Back to agents
-        </Link>
-        <h1 className="break-words text-3xl font-extrabold tracking-tight text-zk-text">{thread.agent.name}</h1>
-        <p className={agentsMutedClass}>
-          Messages reach the agent through its inbox.{" "}
-          {thread.isOwner
-            ? "Its questions to you appear here too."
-            : "Questions it asks go to its owner and aren't shown here."}
-        </p>
-      </div>
+      <Link href="/agents" className={`text-sm ${agentsLink}`}>
+        ← Back to agents
+      </Link>
+
+      <AgentProfileCard
+        agent={profile.agent}
+        title={
+          <h1 className="break-words text-3xl font-extrabold tracking-tight text-zk-text">{thread.agent.name}</h1>
+        }
+      />
+
+      <AgentActivity items={profile.activity} />
 
       {thread.isOwner && !thread.agent.revoked ? (
         <section className={`${agentsSurface} p-4 sm:p-6`} aria-labelledby="instructions-heading">
@@ -93,6 +176,12 @@ export default async function AgentPage({ params }: { params: Promise<{ name: st
         <h2 id="thread-heading" className="text-sm font-bold uppercase tracking-[0.06em] text-zk-muted">
           Conversation
         </h2>
+        <p className={`mt-2 ${agentsMutedClass}`}>
+          Messages reach the agent through its inbox.{" "}
+          {thread.isOwner
+            ? "Its questions to you appear here too."
+            : "Questions it asks go to its owner and aren't shown here."}
+        </p>
         {thread.entries.length === 0 ? (
           <p className={`mt-3 ${agentsMutedClass}`}>Nothing yet.</p>
         ) : (
