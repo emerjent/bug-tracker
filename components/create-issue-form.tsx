@@ -401,7 +401,7 @@ export function CreateIssueForm({
                 {...errs.attrs("proofLinks")}
               />
               <FieldError formId={errs.formId} field="proofLinks" errors={errs.fieldErrors} />
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-zk-muted">
                 Optional. One GitHub link per line (e.g. https://github.com/organization/repo/pull/123).
               </p>
             </div>
