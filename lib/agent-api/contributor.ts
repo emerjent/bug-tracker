@@ -1,9 +1,8 @@
 import { prisma } from "@/lib/prisma";
 import type { AgentContext } from "@/lib/agents/require-agent";
 import { requireLevel } from "@/lib/agents/levels";
-import { WORK_READINESS_VOTE_THRESHOLD } from "@/lib/ticket-assignment";
 import { workflowFor } from "@/lib/workflow";
-import { isConfirmed } from "@/lib/agent-api/validation";
+import { openIssueConfirmations, type IssueConfirmation } from "@/lib/issue-stage";
 
 export type ClaimableIssue = {
   id: string;
@@ -16,24 +15,29 @@ export type ClaimableIssue = {
 };
 
 /**
- * Scan for issues ready to be claimed or bid on by contributors.
+ * Confirmed issues free to be claimed or bid on: no active claim and no live
+ * offer. Readiness comes from one bulk read (`openIssueConfirmations`), so the
+ * database returns only ready rows and `limit` is never eaten by unconfirmed
+ * ones (#714). Pass `confirmations` to reuse a read the caller already made.
  */
 export async function findClaimableIssues(
   agent: AgentContext,
   projectId: string,
   limit = 50,
+  confirmations?: Map<string, IssueConfirmation>,
 ): Promise<ClaimableIssue[]> {
   requireLevel(agent, "working");
   const workflow = await workflowFor(projectId);
   const offerCutoff = new Date(Date.now() - workflow.offerWindowSeconds * 1000);
+  const stages = confirmations ?? await openIssueConfirmations(prisma, { tenantId: agent.tenantId, projectId });
+  const readyIds = [...stages].filter(([, confirmation]) => confirmation.stage === "ready").map(([id]) => id);
+  if (readyIds.length === 0) return [];
 
-  const candidates = await prisma.bug.findMany({
+  return prisma.bug.findMany({
     where: {
+      id: { in: readyIds },
       tenantId: agent.tenantId,
       projectId,
-      isDeleted: false,
-      status: "open",
-      voteCount: { gte: WORK_READINESS_VOTE_THRESHOLD },
       claims: {
         none: {
           releasedAt: null,
@@ -44,8 +48,8 @@ export async function findClaimableIssues(
         },
       },
     },
-    take: limit * 2,
-    orderBy: { createdAt: "asc" },
+    take: limit,
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
     select: {
       id: true,
       number: true,
@@ -56,22 +60,4 @@ export async function findClaimableIssues(
       createdAt: true,
     },
   });
-
-  const claimable: ClaimableIssue[] = [];
-  for (const bug of candidates) {
-    if (claimable.length >= limit) break;
-    if (!(await isConfirmed(bug.id))) continue;
-
-    claimable.push({
-      id: bug.id,
-      number: bug.number,
-      title: bug.title,
-      projectId: bug.projectId,
-      voteCount: bug.voteCount,
-      severity: bug.severity,
-      createdAt: bug.createdAt,
-    });
-  }
-
-  return claimable;
 }

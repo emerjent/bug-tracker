@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
-import { confirm, fileIssue, ok, refused, unique, ziki } from "./helpers";
+import { confirm, feedItem, fileIssue, offeredTo, ok, refused, unique, ziki } from "./helpers";
 
 /** Talking about an issue and lining up work on it, through the CLI. */
 describe("working on issues together", () => {
   let id: string;
 
   beforeAll(async () => {
-    id = await fileIssue("cara", "CLI collaboration: list goes blank");
+    // Comments are for issues; ideas take only verdicts.
+    id = await fileIssue("cara", "CLI collaboration: list goes blank", ["ada", "bob", "eli"]);
   });
 
   it("threads comments and replies, readable newest-first and from the start", async () => {
@@ -44,9 +45,9 @@ describe("working on issues together", () => {
     expect(JSON.stringify(await ok("ada", "list-interest", { id }))).not.toContain("Happy to take this.");
   });
 
-  it("takes bids once the issue is ready (three upvotes), and a bid can be withdrawn", async () => {
-    await refused("eli", "volunteer", { id, note: "Not ready yet." }, 409);
-    for (const agent of ["ada", "bob", "dana"] as const) await ok(agent, "vote", { id });
+  it("takes bids once the issue is ready (converted and confirmed), and a bid can be withdrawn", async () => {
+    // A confirmed issue is not offered automatically, so it is open to bids.
+    expect(await offeredTo(id)).toBeNull();
     const bid = await ok("eli", "volunteer", { id, note: "I can fix this today." });
     expect(bid.bid_id).toBeTruthy();
     expect(JSON.stringify(await ok("cara", "list-bids", { id }))).toContain(bid.bid_id);
@@ -101,14 +102,15 @@ describe("working on issues together", () => {
     expect(stream.code).toBe(0);
   });
 
-  it("finds work by role: triageable and reviewable issues", async () => {
-    const fresh = await fileIssue("ada", "CLI collaboration: needs triage");
-    expect(JSON.stringify(await ok("bob", "find-triageable-issues"))).toContain(fresh);
-    expect(JSON.stringify(await ok("bob", "find-reviewable-issues", { type: "validation" }))).toContain(fresh);
+  it("lists a converted issue to confirm in the work feed, the one queue (#714)", async () => {
+    // Ideas take verdicts; the feed lists the issue to confirm once converting creates it.
+    const fresh = await fileIssue("ada", "CLI collaboration: needs confirming", ["bob", "cara", "eli"]);
+    const item = await feedItem("bob", "confirm_issue", fresh);
+    expect(item?.actions?.map((action) => action.name)).toEqual(["validate_issue", "check_duplicate"]);
   });
 
   it("structures an agent's report, and marks a duplicate through structuring", async () => {
-    const draft = await fileIssue("ada", "CLI collaboration: draft to structure");
+    const draft = await fileIssue("ada", "CLI collaboration: draft to structure", ["bob", "cara", "eli"]);
     const structured = await ok("bob", "structure-issue", {
       id: draft,
       stepsToReproduce: "1. Open the list. 2. Scroll.",
@@ -116,7 +118,7 @@ describe("working on issues together", () => {
       actualBehavior: "The list goes blank.",
     });
     expect(JSON.stringify(structured)).toMatch(/Rows stay visible|structured|issue/);
-    const duplicate = await fileIssue("ada", "CLI collaboration: the same blank list");
+    const duplicate = await fileIssue("ada", "CLI collaboration: the same blank list", ["bob", "cara", "eli"]);
     const marked = await ok("bob", "structure-issue", { id: duplicate, duplicateOfId: id });
     expect(JSON.stringify(marked)).toContain(id);
   });
@@ -130,29 +132,30 @@ describe("working on issues together", () => {
     expect(JSON.stringify(proposed)).toMatch(/proposed|redesign/i);
   });
 
-  it("uploads an attachment and files an issue with it", async () => {
+  it("uploads an attachment and files an idea with it", async () => {
     // A 1×1 transparent PNG.
     const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
     const uploaded = await ok("ada", "upload-attachment", { filename: "screenshot.png", dataBase64: png });
     const attachmentId = uploaded.attachment?.id ?? uploaded.id;
     expect(attachmentId, JSON.stringify(uploaded)).toBeTruthy();
-    const created = await ok("ada", "create-issue", {
+    const created = await ok("ada", "create-idea", {
       title: unique("CLI collaboration: with a screenshot"),
       description: "Steps: open it. Expected: it works. Actual: see the screenshot.",
       attachmentIds: [attachmentId],
       acknowledgeSimilar: true,
     });
-    expect(JSON.stringify(created.issue.attachments)).toContain(attachmentId);
+    expect(JSON.stringify(created.idea.attachments)).toContain(attachmentId);
   });
 
-  it("warns before filing a similar-looking issue, and files it once acknowledged", async () => {
+  it("warns before filing a report like an open idea, and files it once acknowledged", async () => {
     const title = unique("CLI collaboration: duplicate check");
     const description = "Steps: open the page and press Save. Expected: it saves. Actual: nothing happens.";
-    await ok("ada", "create-issue", { title, description, acknowledgeSimilar: true });
+    await ok("ada", "create-idea", { title, description, acknowledgeSimilar: true });
     const idempotencyKey = randomUUID();
-    const warned = await refused("bob", "create-issue", { title, description, idempotencyKey }, 409);
+    const warned = await refused("bob", "create-idea", { title, description, idempotencyKey }, 409);
     expect(warned.error).toBe("similar_issues");
-    const filed = await ok("bob", "create-issue", { title, description, idempotencyKey, acknowledgeSimilar: true });
-    expect(filed.issue.title).toBe(title);
+    expect(warned.matches[0]).toMatchObject({ title, kind: "idea" });
+    const filed = await ok("bob", "create-idea", { title, description, idempotencyKey, acknowledgeSimilar: true });
+    expect(filed.idea.title).toBe(title);
   });
 });

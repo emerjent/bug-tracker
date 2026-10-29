@@ -48,6 +48,7 @@ vi.mock("@/lib/prisma", () => {
     comment: { create: vi.fn(async () => ({ id: "comment-new" })) },
     bugActivity: { create: vi.fn() },
     bug: { update: vi.fn() },
+    idea: { create: vi.fn() },
   };
   return {
     prisma: {
@@ -100,6 +101,7 @@ beforeEach(() => {
     reporterId: "carol",
     assigneeId: null,
     tenantId: "tenant-zedu",
+    convertedToIssueAt: new Date("2026-10-19T13:00:00Z"),
   });
 });
 
@@ -126,7 +128,8 @@ describe("addCommentAction (#502)", () => {
 
 describe("createBugAction (#502)", () => {
   it("resolves description mentions against the reporter's tenant", async () => {
-    db.bug.create.mockRejectedValue(new Error("stop after create"));
+    const ideaCreate = (prisma as unknown as { __tx: { idea: { create: ReturnType<typeof vi.fn> } } }).__tx.idea.create;
+    ideaCreate.mockRejectedValue(new Error("stop after create"));
     await createBugAction(
       form({
         title: "Bug list filter resets after navigation",
@@ -135,8 +138,8 @@ describe("createBugAction (#502)", () => {
       }),
     ).catch(() => undefined);
 
-    expect(db.bug.create).toHaveBeenCalledTimes(1);
-    expect(db.bug.create.mock.calls[0][0].data.description).toBe(
+    expect(ideaCreate).toHaveBeenCalledTimes(1);
+    expect(ideaCreate.mock.calls[0][0].data.description).toBe(
       `Filters reset when I go back to the list. cc @Dave Acme @[Bob](${bob})`,
     );
     expect(db.user.findMany.mock.calls[0][0].where.memberships).toEqual({ some: { tenantId: "tenant-zedu" } });

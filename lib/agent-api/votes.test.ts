@@ -31,7 +31,8 @@ describe("agent upvotes", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     db.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(db));
-    db.$queryRaw.mockResolvedValue([{ id: bugId }]);
+    // Upvotes apply to issues; an idea takes verdicts instead (#idea-verdicts).
+    db.$queryRaw.mockResolvedValue([{ id: bugId, convertedToIssueAt: new Date("2026-10-20T00:00:00Z") }]);
     db.agentEvent.create.mockResolvedValue({ id: "evt-1" });
     db.agentEvent.findUnique.mockResolvedValue({ id: "evt-1" });
     db.webhookSubscription.findMany.mockResolvedValue([]);
@@ -134,7 +135,7 @@ describe("agent upvotes", () => {
   });
 
   it("counts a manager agent's upvote once on its owner's own report", async () => {
-    db.$queryRaw.mockResolvedValue([{ id: bugId, reporterId: "user-ada", beneficiaryUserId: "user-ada" }]);
+    db.$queryRaw.mockResolvedValue([{ id: bugId, reporterId: "user-ada", beneficiaryUserId: "user-ada", convertedToIssueAt: new Date("2026-10-20T00:00:00Z") }]);
     db.vote.findUnique.mockResolvedValue(null);
     db.vote.create.mockResolvedValue({ id: "vote-1" });
 

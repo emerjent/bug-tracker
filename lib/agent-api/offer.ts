@@ -2,13 +2,13 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { AgentContext } from "@/lib/agents/require-agent";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 import { isConfirmed } from "@/lib/agent-api/validation";
 import { publish } from "@/lib/agent-api/events";
 import { notifyClaimOffered } from "@/lib/agent-notifications";
 import { workflowFor } from "@/lib/workflow";
 import { DEFAULT_PROJECT_WORKFLOW } from "@/lib/workflow-config";
-import { canAssignTicket, WORK_READINESS_VOTE_THRESHOLD } from "@/lib/ticket-assignment";
+import { canAssignTicket } from "@/lib/ticket-assignment";
 import { assigneeChangedSummary, statusChangedSummary } from "@/lib/activity-log";
 import { ensureWatching } from "@/lib/watch";
 import { assertRedesignOpen } from "@/lib/redesigns";
@@ -160,13 +160,14 @@ export async function offerIssue(agent: AgentContext, projectId: string, bugId: 
       const bug = await tx.bug.findFirst({ where: { id: bugId, tenantId: agent.tenantId, projectId, isDeleted: false }, select: { id: true, title: true, projectId: true, status: true, assigneeId: true, areaId: true, voteCount: true } });
       if (!bug) throw new IssueApiError(404, "Issue not found in this project.");
       if (bug.status !== "open") throw new IssueApiError(409, "Only open issues can be offered.");
-      if (bug.voteCount < WORK_READINESS_VOTE_THRESHOLD) throw new IssueApiError(409, `The issue must reach at least ${WORK_READINESS_VOTE_THRESHOLD} upvotes before it can be offered.`);
       if (!await isConfirmed(bugId, tx)) throw new IssueApiError(409, "The issue must be confirmed before it can be offered.");
       await assertRedesignOpen(bugId, tx);
       await assertApprovalOpen(bugId, "before_offer", { db: tx, tenantId: agent.tenantId, agent });
       const current = await tx.issueClaim.findFirst({ where: { bugId, releasedAt: null } });
       if (current) {
-        if (current.status === "offered" && !isOfferExpired(current.offeredAt)) {
+        // The project's offer window, as the expiry sweep and accept use.
+        const { offerWindowSeconds } = await workflowFor(projectId, tx);
+        if (current.status === "offered" && !isOfferExpired(current.offeredAt, Date.now(), offerWindowSeconds * 1000)) {
           return { claim: current, beneficiaryUserId: current.beneficiaryUserId, bugTitle: bug.title, created: false };
         }
         if (current.status === "active") throw new IssueApiError(409, "This issue already has an active claim.");
@@ -302,7 +303,7 @@ export async function acceptOffer(agent: AgentContext, claimId: string) {
         const next = await offerNext(tx, agent, fresh.bug);
         return { unavailable: true as const, next, bugId: fresh.bugId };
       }
-      if (fresh.bug.status !== "open" || !canAssignTicket({ actorId: fresh.beneficiaryUserId, actorRole: "user", currentAssigneeId: fresh.bug.assigneeId, targetAssigneeId: fresh.beneficiaryUserId, voteCount: fresh.bug.voteCount, claimed: true })) {
+      if (fresh.bug.status !== "open" || !canAssignTicket({ actorId: fresh.beneficiaryUserId, actorRole: "user", currentAssigneeId: fresh.bug.assigneeId, targetAssigneeId: fresh.beneficiaryUserId, claimed: true })) {
         await tx.issueClaim.update({ where: { id: fresh.id }, data: { status: "released", releasedAt: now, releaseReason: "unavailable" } });
         await publish(tx, { tenantId: agent.tenantId, type: "claim.released", actorAgentId: agent.agentId, bugId: fresh.bugId,
           payload: { claimId: fresh.id, issueId: fresh.bugId, beneficiaryUserId: fresh.beneficiaryUserId, reason: "unavailable" } });
