@@ -87,7 +87,10 @@ describe("an agent gives work back (#547)", () => {
 
   it("offers the issue to someone else, never back to the same person", async () => {
     db.$queryRaw.mockResolvedValueOnce([{ id: "bug-1" }]).mockResolvedValueOnce([{ id: "bob" }]);
-    db.issueClaim.findFirst.mockResolvedValueOnce(claim("active")).mockResolvedValueOnce(null);
+    db.issueClaim.findFirst
+      .mockResolvedValueOnce(claim("active"))
+      .mockResolvedValueOnce(null) // no live offer on the issue
+      .mockResolvedValueOnce(null); // bob holds no other pending offer
     db.bug.findFirstOrThrow.mockResolvedValue({ id: "bug-1", title: "T", status: "in_progress", assigneeId: "ada", projectId: "p" });
     isConfirmed.mockResolvedValue(true);
     db.membership.findMany.mockResolvedValue([
@@ -101,6 +104,26 @@ describe("an agent gives work back (#547)", () => {
     expect(result.reofferedTo).toBe("bob");
     expect(db.issueClaim.create.mock.calls[0][0].data).toMatchObject({ beneficiaryUserId: "bob", agentId: "agent-bob", status: "offered" });
     expect(notifyClaimOffered).toHaveBeenCalledWith(expect.objectContaining({ beneficiaryUserId: "bob" }));
+  });
+
+  it("does not re-offer to someone already holding another pending offer (#666)", async () => {
+    db.$queryRaw.mockResolvedValueOnce([{ id: "bug-1" }]).mockResolvedValueOnce([{ id: "bob" }]);
+    db.issueClaim.findFirst
+      .mockResolvedValueOnce(claim("active"))
+      .mockResolvedValueOnce(null) // no live offer on the issue
+      .mockResolvedValueOnce({ id: "claim-other", bugId: "bug-2", status: "offered", releasedAt: null });
+    db.bug.findFirstOrThrow.mockResolvedValue({ id: "bug-1", title: "T", status: "in_progress", assigneeId: "ada", projectId: "p" });
+    isConfirmed.mockResolvedValue(true);
+    db.membership.findMany.mockResolvedValue([
+      { userId: "ada", user: { agents: [{ id: "agent-ada" }] } },
+      { userId: "bob", user: { agents: [{ id: "agent-bob" }] } },
+    ]);
+
+    const result = await releaseClaim(agent, "p", "bug-1");
+
+    expect(result.reofferedTo).toBeNull();
+    expect(db.issueClaim.create).not.toHaveBeenCalled();
+    expect(notifyClaimOffered).not.toHaveBeenCalled();
   });
 
   it("is 409 when the agent holds nothing on the issue", async () => {

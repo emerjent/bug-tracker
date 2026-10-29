@@ -167,8 +167,9 @@ describe("stale claim release", () => {
       deliverBy: new Date(now.getTime() - 1),
       bug: { pullRequestUrl: null },
     });
-    // The locked re-read sees the claim; the re-offer's existing-offer probe sees none.
-    db.issueClaim.findFirst.mockResolvedValueOnce(null);
+    // The locked re-read sees the claim; the re-offer finds no offer on this
+    // issue and no other pending offer held by the candidate.
+    db.issueClaim.findFirst.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     expect(await releaseStaleClaims("project")).toEqual({ released: 1 });
     // The reopened issue is offered to someone else, never straight back.
     expect(db.issueClaim.create).toHaveBeenCalledWith(expect.objectContaining({
@@ -273,7 +274,9 @@ describe("scheduled stale-claim sweep (#524)", () => {
       select: { id: true, bugId: true, bug: { select: { tenantId: true, projectId: true } } } });
   });
   it("rewrites the released issue to open and offers it to the next eligible agent", async () => {
-    db.issueClaim.findFirst.mockResolvedValueOnce(claim).mockResolvedValueOnce(null);
+    db.issueClaim.findFirst.mockResolvedValueOnce(claim)
+      .mockResolvedValueOnce(null) // no live offer on the reopened issue
+      .mockResolvedValueOnce(null); // the candidate holds no other pending offer
     db.membership.findMany.mockResolvedValue([{ userId: "next-owner", user: { agents: [{ id: "agent-next" }] } }]);
     expect(await sweepStaleClaims()).toEqual({ released: 1, offered: 1 });
     const events = db.agentEvent.create.mock.calls.map(([call]) => call.data);

@@ -149,9 +149,7 @@ export async function offerNext(db: Db, caller: { agentId?: string; tenantId: st
       bugId: { not: bug.id },
     },
   });
-  if (otherPending && otherPending.bugId !== bug.id) {
-    return null;
-  }
+  if (otherPending) return null;
 
   try {
     const claim = await db.issueClaim.create({ data: {

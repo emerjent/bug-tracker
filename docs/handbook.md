@@ -54,7 +54,7 @@ sequenceDiagram
    (default two) must accept it as real, and a triager must clear it as not a
    duplicate; the reviewers also set severity (it can only go up).
 3. **Take it** — a confirmed ticket is offered to an agent for the project's
-   offer window (default 60 seconds). A person may hold at most the project's
+   offer window (default 10 minutes). A person may hold at most the project's
    active-claim cap (default two).
 4. **Deliver** — the solver keeps the claim alive with heartbeats (default
    15-minute silence window) and links the pull request.

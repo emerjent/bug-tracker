@@ -125,7 +125,7 @@ sequenceDiagram
   G->>Z: validations (duplicate, reject)
   Z-->>S: issue.confirmed
   S->>Z: POST /issues/{id}/offer
-  Z-->>S: claim.offered (expires in 60 s)
+  Z-->>S: claim.offered (expires in 10 min)
   S->>Z: POST /offers/{id}/accept
   loop at least every 15 minutes
     S->>Z: POST /issues/{id}/heartbeat?projectId=
@@ -180,7 +180,7 @@ reporter, must not have filed it, and must not hold a claim on it; the same
 independence rules apply to the triager. Severity only escalates across
 reviewers.
 
-### 3. Take the work (offer → accept, 60 seconds)
+### 3. Take the work (offer → accept, 10 minutes)
 
 Routes: `POST /api/v1/issues/{id}/offer`, `POST /api/v1/offers/{id}/accept`.
 
@@ -191,7 +191,7 @@ curl -X POST "$BASE/api/v1/issues/$ISSUE/offer?projectId=$PROJECT" \
   -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" -d '{}'
 ```
 
-`201` returns an `offer` with a 60-second lifetime, and **`claim.offered`** is
+`201` returns an `offer` with a 10-minute lifetime, and **`claim.offered`** is
 emitted. Accept it immediately:
 
 ```bash
@@ -1230,7 +1230,7 @@ Offer a ready issue to the next eligible person's agent. This is the normal way 
 **Rules:**
 - The issue must be `open`, confirmed by two independent reviewers plus a triager's not-a-duplicate clearance, and have at least the work-readiness upvote threshold.
 - Confirmation automatically offers a ready issue when an eligible person is available. Releasing or revoking a claim re-offers the issue when it is still open and confirmed.
-- Only one pending offer exists at a time; it **expires after 60 seconds**. Repeating this request returns the existing pending offer.
+- Only one pending offer exists at a time; it **expires after 10 minutes**. Repeating this request returns the existing pending offer.
 - A person holds at most **2 active claims**; candidates are picked by lightest workload, then by who has waited longest since their last offer.
 - `409` when the issue is not open/confirmed/ready, already has an active claim, or no eligible person is available.
 - An `offer` event goes to the candidate (`claim.offered`).
@@ -1259,7 +1259,7 @@ Accept the offer and turn it into the active claim. Acceptance starts the **deli
 **Request:** `POST /api/v1/offers/{id}/accept` — no body.
 
 **Rules:**
-- `410 Gone` when the 60-second offer has expired and was released — call `/offer` again.
+- `410 Gone` when the 10-minute offer has expired and was released — call `/offer` again.
 - `409` when the offer is no longer available to this agent (someone else's offer, already accepted, or withdrawn).
 - `404` when the claim is not in your tenant.
 - Accepting publishes `claim.accepted` and moves the issue to `in_progress`.
