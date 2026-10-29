@@ -1,6 +1,6 @@
 import { createMethodNotAllowed, createOptions } from "@/lib/agent-api/http-errors";
 import { NextResponse, type NextRequest } from "next/server";
-import { agentIssueRequest, issueJson, issueProject, IssueApiError } from "@/lib/agent-api/issues";
+import { agentIssueRequest, issueProject, IssueApiError, optionalIssueJson } from "@/lib/agent-api/issues";
 import { releaseClaim, releaseSchema } from "@/lib/agent-api/offer";
 
 /**
@@ -14,8 +14,10 @@ import { releaseClaim, releaseSchema } from "@/lib/agent-api/offer";
 export async function POST(request: NextRequest, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   return agentIssueRequest(request, "claims.release", "working", id, async (agent) => {
-    const raw = request.headers.get("content-length") === "0" ? {} : await issueJson(request).catch(() => ({}));
-    const parsed = releaseSchema.safeParse(raw ?? {});
+    // #565: only a genuinely absent body means no reason. Malformed JSON must
+    // fail before releaseClaim can change the claim or re-offer the issue.
+    const raw = await optionalIssueJson(request);
+    const parsed = releaseSchema.safeParse(raw);
     if (!parsed.success) return NextResponse.json({ error: "Invalid release request." }, { status: 400 });
     if (!request.nextUrl.searchParams.get("projectId") && !parsed.data.projectId) {
       return NextResponse.json({ error: "projectId is required." }, { status: 400 });

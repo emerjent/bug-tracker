@@ -124,6 +124,18 @@ export async function issueJson(request: NextRequest): Promise<unknown> {
   catch { throw new IssueApiError(400, "Send a valid JSON body."); }
 }
 
+/**
+ * Parse an optional JSON body (#565). A truly absent or blank body means no
+ * body at all; malformed JSON is a 400 rather than silently becoming `{}`, so
+ * a truncated payload can never trigger an irreversible write.
+ */
+export async function optionalIssueJson(request: NextRequest): Promise<unknown> {
+  const text = await request.text();
+  if (!text.trim()) return {};
+  try { return JSON.parse(text); }
+  catch { throw new IssueApiError(400, "Send a valid JSON body."); }
+}
+
 /** The 400 for an issue route called without a project. */
 export const PROJECT_ID_REQUIRED =
   "projectId is required. Pass it as ?projectId= or in the JSON body. Your owner can copy it from Settings, under Agents.";
