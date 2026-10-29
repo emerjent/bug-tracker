@@ -811,14 +811,16 @@ export async function updateBugAction(
         });
       }
       if (data.status === "resolved" || data.status === "closed") {
+        // #621: release pending (`offered`) claims as well as active ones, so a
+        // resolved/closed issue can't be re-offered once its claim lapses.
         const activeClaims = typeof tx.issueClaim?.findMany === "function"
           ? await tx.issueClaim.findMany({
-              where: { bugId, status: "active", releasedAt: null },
+              where: { bugId, status: { in: ["active", "offered"] }, releasedAt: null },
               select: { id: true, agentId: true, beneficiaryUserId: true },
             })
           : [];
         await tx.issueClaim.updateMany({
-          where: { bugId, status: "active", releasedAt: null },
+          where: { bugId, status: { in: ["active", "offered"] }, releasedAt: null },
           data: { status: "released", releasedAt: new Date(), releaseReason: data.status },
         });
         for (const claim of activeClaims) {
@@ -1708,8 +1710,10 @@ export async function deleteBugAction(bugId: string): Promise<ActionResult> {
     return { error: TICKET_DELETION_ERRORS.invalidId };
   }
 
+  const tenantId = await currentTenantIdFor(user.id);
+
   const existing = await prisma.bug.findUnique({
-    where: { id: bugId, ...bugInTenant(await currentTenantIdFor(user.id)) },
+    where: { id: bugId, ...bugInTenant(tenantId) },
     select: { id: true, isDeleted: true },
   });
 
@@ -1737,6 +1741,21 @@ export async function deleteBugAction(bugId: string): Promise<ActionResult> {
       });
       // Delete attachments associated with the issue to prevent storage bloat (#658)
       await tx.attachment.deleteMany({ where: { bugId } });
+
+      // #621: release active and pending (`offered`) claims too, so a deleted
+      // issue is not re-offered by the expiry sweep once its claim lapses.
+      const claimsToRelease = await tx.issueClaim.findMany({
+        where: { bugId, releasedAt: null, status: { in: ["active", "offered"] } },
+        select: { id: true, agentId: true, beneficiaryUserId: true },
+      });
+      await tx.issueClaim.updateMany({
+        where: { bugId, releasedAt: null, status: { in: ["active", "offered"] } },
+        data: { status: "released", releasedAt: new Date(), releaseReason: "deleted" },
+      });
+      for (const claim of claimsToRelease) {
+        await publish(tx, { tenantId, type: "claim.released", actorAgentId: claim.agentId, bugId,
+          payload: { claimId: claim.id, issueId: bugId, beneficiaryUserId: claim.beneficiaryUserId, reason: "deleted" } });
+      }
 
       await publishWebEvent(tx, { bugId, type: "issue.deleted", actorUserId: user.id });
 

@@ -55,8 +55,10 @@ export async function resolveIssuesForMergedPullRequest(
           metadata: { field: "status", from: bug.status, to: "resolved", via: "github_pull_request_merged", pullRequestUrl },
         },
       });
+      // #621: release pending (`offered`) claims too, so a resolved issue can't
+      // be re-offered by the expiry sweep once its claim lapses.
       await tx.issueClaim.updateMany({
-        where: { bugId: bug.id, status: "active", releasedAt: null },
+        where: { bugId: bug.id, status: { in: ["active", "offered"] }, releasedAt: null },
         data: { status: "released", releasedAt: new Date(), releaseReason: "resolved" },
       });
       for (const claim of bug.claims) {

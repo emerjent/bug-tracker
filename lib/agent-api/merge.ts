@@ -545,8 +545,10 @@ export async function acceptFix(
       },
     });
 
+    // #621: release pending (`offered`) claims too, so a merged issue can't be
+    // re-offered by the expiry sweep once its claim lapses.
     await tx.issueClaim.updateMany({
-      where: { bugId: bug.id, status: "active", releasedAt: null },
+      where: { bugId: bug.id, status: { in: ["active", "offered"] }, releasedAt: null },
       data: { status: "released", releasedAt: new Date(), releaseReason: "resolved" },
     });
 

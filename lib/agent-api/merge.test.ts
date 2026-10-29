@@ -421,7 +421,7 @@ describe("acceptFix: a successful accept (#434)", () => {
       },
     });
     expect(db.issueClaim.updateMany).toHaveBeenCalledWith({
-      where: { bugId: "bug1", status: "active", releasedAt: null },
+      where: { bugId: "bug1", status: { in: ["active", "offered"] }, releasedAt: null },
       data: { status: "released", releasedAt: expect.any(Date), releaseReason: "resolved" },
     });
 
@@ -479,7 +479,7 @@ describe("acceptFix: a successful accept (#434)", () => {
 
     expect(await executeAdminMerge(merger("m1", "mo", "admin_merger"), "bug1", { client: defaultMockGhClient() })).toMatchObject({ status: 200, accepted: true });
     expect(db.issueClaim.updateMany).toHaveBeenCalledWith({
-      where: { bugId: "bug1", status: "active", releasedAt: null },
+      where: { bugId: "bug1", status: { in: ["active", "offered"] }, releasedAt: null },
       data: { status: "released", releasedAt: expect.any(Date), releaseReason: "resolved" },
     });
   });

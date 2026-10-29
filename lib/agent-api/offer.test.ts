@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+vi.mock("@/lib/agent-notifications", () => ({ notifyClaimOffered: vi.fn() }));
 import { availableOfferCandidates, isOfferExpired, offerNext, OFFER_TTL_MS } from "@/lib/agent-api/offer";
+import { notifyClaimOffered } from "@/lib/agent-notifications";
 
 describe("ticket offers", () => {
   it.each(["dispatcher", "merger", "contributor"] as const)("persists reward attribution only for a dispatcher offer (%s)", async (level) => {
@@ -207,6 +209,120 @@ describe("ticket offers", () => {
       }),
     );
     expect(txMock.membership.findMany).not.toHaveBeenCalled();
+  });
+
+  function expiredClaimTx(bugStatus: "open" | "closed" | "resolved", isDeleted = false) {
+    return {
+      issueClaim: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "claim-1",
+          bugId: "bug-1",
+          status: "offered",
+          offeredAt: new Date(Date.now() - 1_900_000),
+          releasedAt: null,
+          agentId: "agent-1",
+          beneficiaryUserId: "user-1",
+          bug: { tenantId: "tenant-1", id: "bug-1", title: "Bug 1", projectId: "proj-1", assigneeId: null, status: bugStatus, isDeleted },
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      issueBid: {
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ id: "bug-1" }]),
+      agentEvent: {
+        create: vi.fn().mockResolvedValue({ id: "e1" }),
+      },
+      webhookSubscription: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      membership: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+  }
+
+  it.each([
+    ["a closed issue", "closed"],
+    ["a resolved issue", "resolved"],
+  ])("does not re-offer an expired offer on %s (#621)", async (_label, bugStatus) => {
+    const { prisma } = await import("@/lib/prisma");
+    const { expireOffer } = await import("@/lib/agent-api/offer");
+    const txMock = expiredClaimTx(bugStatus);
+    vi.spyOn(prisma, "$transaction").mockImplementation(async (fn: unknown) =>
+      (fn as (tx: unknown) => unknown)(txMock),
+    );
+
+    const didExpire = await expireOffer("claim-1");
+    expect(didExpire).toBe(true);
+    expect(txMock.issueClaim.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ releaseReason: "expired" }) }),
+    );
+    // The issue is finished, so offerNext is never reached: no successor offer, no notification.
+    expect(txMock.membership.findMany).not.toHaveBeenCalled();
+  });
+
+  it("does not re-offer an expired offer on a deleted issue (#621)", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    const { expireOffer } = await import("@/lib/agent-api/offer");
+    const txMock = expiredClaimTx("open", true);
+    vi.spyOn(prisma, "$transaction").mockImplementation(async (fn: unknown) =>
+      (fn as (tx: unknown) => unknown)(txMock),
+    );
+
+    const didExpire = await expireOffer("claim-1");
+    expect(didExpire).toBe(true);
+    expect(txMock.issueClaim.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ releaseReason: "expired" }) }),
+    );
+    expect(txMock.membership.findMany).not.toHaveBeenCalled();
+  });
+
+  it("still re-offers an expired offer on an open issue (#621)", async () => {
+    const { prisma } = await import("@/lib/prisma");
+    const { expireOffer } = await import("@/lib/agent-api/offer");
+    vi.spyOn(prisma.projectWorkflow, "findUnique").mockResolvedValue(null);
+    const txMock = {
+      issueClaim: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: "claim-1",
+          bugId: "bug-1",
+          status: "offered",
+          offeredAt: new Date(Date.now() - 1_900_000),
+          releasedAt: null,
+          agentId: "agent-1",
+          beneficiaryUserId: "user-1",
+          bug: { tenantId: "tenant-1", id: "bug-1", title: "Bug 1", projectId: "proj-1", assigneeId: null, status: "open", isDeleted: false },
+        }),
+        findFirst: vi.fn().mockResolvedValue(null),
+        groupBy: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockImplementation(({ data }: { data: { offeredAt: Date } }) => ({ id: "claim-new", status: "offered", offeredAt: data.offeredAt })),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      issueBid: {
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
+      membership: {
+        findMany: vi.fn().mockResolvedValue([{ userId: "worker", user: { agents: [{ id: "worker-agent", areaPreferences: [] }] } }]),
+      },
+      agentEvent: {
+        create: vi.fn().mockResolvedValue({ id: "e1" }),
+      },
+      webhookSubscription: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      $queryRaw: vi.fn().mockResolvedValue([{ id: "bug-1" }]),
+    };
+    vi.spyOn(prisma, "$transaction").mockImplementation(async (fn: unknown) =>
+      (fn as (tx: unknown) => unknown)(txMock),
+    );
+
+    const didExpire = await expireOffer("claim-1");
+    expect(didExpire).toBe(true);
+    // Open and live: the sweep proceeds to offerNext and creates a successor offer.
+    expect(txMock.membership.findMany).toHaveBeenCalled();
+    expect(txMock.issueClaim.create).toHaveBeenCalled();
+    expect(notifyClaimOffered).toHaveBeenCalled();
   });
 
   it("rejects offer acceptance if the issue already has an active claim (#662)", async () => {

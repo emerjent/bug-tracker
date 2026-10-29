@@ -194,13 +194,13 @@ export async function offerIssue(agent: AgentContext, projectId: string, bugId: 
 /** Durable expiry state is checked here and again on acceptance after restarts. Returns true if expired. */
 export async function expireOffer(claimId: string): Promise<boolean> {
   const result = await prisma.$transaction(async (tx) => {
-    const claim = await tx.issueClaim.findUnique({ where: { id: claimId }, select: { id: true, bugId: true, status: true, offeredAt: true, releasedAt: true, agentId: true, beneficiaryUserId: true, bug: { select: { tenantId: true, id: true, title: true, projectId: true, assigneeId: true, areaId: true } } } });
+    const claim = await tx.issueClaim.findUnique({ where: { id: claimId }, select: { id: true, bugId: true, status: true, offeredAt: true, releasedAt: true, agentId: true, beneficiaryUserId: true, bug: { select: { tenantId: true, id: true, title: true, projectId: true, assigneeId: true, areaId: true, status: true, isDeleted: true } } } });
     if (!claim || claim.status !== "offered" || claim.releasedAt) return null;
     const { offerWindowSeconds } = await workflowFor(claim.bug.projectId, tx);
     const offerWindowMs = offerWindowSeconds * 1000;
     if (!isOfferExpired(claim.offeredAt, Date.now(), offerWindowMs)) return null;
     await tx.$queryRaw`SELECT "id" FROM "Bug" WHERE "id" = ${claim.bugId} FOR UPDATE`;
-    const fresh = await tx.issueClaim.findUnique({ where: { id: claimId }, select: { id: true, bugId: true, status: true, offeredAt: true, releasedAt: true, agentId: true, beneficiaryUserId: true, bug: { select: { tenantId: true, id: true, title: true, projectId: true, assigneeId: true, areaId: true } } } });
+    const fresh = await tx.issueClaim.findUnique({ where: { id: claimId }, select: { id: true, bugId: true, status: true, offeredAt: true, releasedAt: true, agentId: true, beneficiaryUserId: true, bug: { select: { tenantId: true, id: true, title: true, projectId: true, assigneeId: true, areaId: true, status: true, isDeleted: true } } } });
     if (!fresh || fresh.status !== "offered" || fresh.releasedAt || !isOfferExpired(fresh.offeredAt, Date.now(), offerWindowMs)) return null;
     const now = new Date();
     await tx.issueClaim.update({ where: { id: claimId }, data: { status: "released", releasedAt: now, releaseReason: "expired" } });
@@ -212,7 +212,9 @@ export async function expireOffer(claimId: string): Promise<boolean> {
           select: { id: true },
         })
       : null);
-    const next = hasPendingBids
+    // #621: never re-offer on a finished or deleted issue. Only open, live
+    // issues may sweep into a fresh offer (matching every other offerNext caller).
+    const next = hasPendingBids || fresh.bug.status !== "open" || fresh.bug.isDeleted
       ? null
       : await offerNext(tx, { tenantId: fresh.bug.tenantId }, fresh.bug);
     return { released: true, next };

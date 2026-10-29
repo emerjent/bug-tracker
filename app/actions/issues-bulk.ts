@@ -175,14 +175,16 @@ export async function bulkUpdateBugsAction(
           .filter((bug) => changedIds.includes(bug.id) && change.status === terminalStatus && bug.status !== terminalStatus)
           .map((bug) => bug.id);
         if (terminalIds.length > 0) {
+          // #621: release pending (`offered`) claims as well as active ones, so
+          // a resolved/closed issue can't be re-offered once its claim lapses.
           const activeClaims = typeof tx.issueClaim?.findMany === "function"
             ? await tx.issueClaim.findMany({
-                where: { bugId: { in: terminalIds }, status: "active", releasedAt: null },
+                where: { bugId: { in: terminalIds }, status: { in: ["active", "offered"] }, releasedAt: null },
                 select: { id: true, agentId: true, beneficiaryUserId: true, bugId: true },
               })
             : [];
           await tx.issueClaim.updateMany({
-            where: { bugId: { in: terminalIds }, status: "active", releasedAt: null },
+            where: { bugId: { in: terminalIds }, status: { in: ["active", "offered"] }, releasedAt: null },
             data: { status: "released", releasedAt: new Date(), releaseReason: terminalStatus },
           });
           for (const claim of activeClaims) {

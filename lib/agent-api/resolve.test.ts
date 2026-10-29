@@ -85,6 +85,17 @@ describe("resolveMergedFix (Ziki #515)", () => {
     expect(publish.mock.calls.map((c) => c[1].type)).toEqual(["claim.released", "issue.updated"]);
   });
 
+  it("releases a pending (`offered`) claim too, so a resolved issue is not re-offered (#621)", async () => {
+    db.bug.findFirst.mockResolvedValue(bug({ assigneeId: null, claims: [{ id: "c1", agentId: "a9", beneficiaryUserId: "owner", status: "offered", releasedAt: null }] }));
+    expect((await resolveMergedFix(agent(), scope, "bug1", PR, () => github().client)).status).toBe(200);
+    expect(db.tx.issueClaim.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: { in: ["active", "offered"] }, releasedAt: null }),
+        data: expect.objectContaining({ status: "released", releaseReason: "resolved" }),
+      }),
+    );
+  });
+
   it("clears the boost on a boosted issue and logs the unboost (#256)", async () => {
     db.bug.findFirst.mockResolvedValue(bug({ isBoosted: true }));
     await resolveMergedFix(agent(), scope, "bug1", PR, () => github().client);

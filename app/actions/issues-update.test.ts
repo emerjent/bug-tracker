@@ -277,10 +277,10 @@ describe("updateBugAction unboosts finished issues (#256)", () => {
 });
 
 describe("updateBugAction releases claims on completed issues (#621)", () => {
-  it.each(["resolved", "closed"] as const)("releases active claims as %s when the issue is completed", async (status) => {
+  it.each(["resolved", "closed"] as const)("releases active and pending claims as %s when the issue is completed (#621)", async (status) => {
     await run("admin", ME, { status });
     expect(claimReleases).toEqual([{
-      where: { bugId: "bug1", status: "active", releasedAt: null },
+      where: { bugId: "bug1", status: { in: ["active", "offered"] }, releasedAt: null },
       data: { status: "released", releasedAt: expect.any(Date), releaseReason: status },
     }]);
   });
