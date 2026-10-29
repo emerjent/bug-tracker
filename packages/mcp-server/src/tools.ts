@@ -42,6 +42,7 @@ const projectId = z
   .describe("Project id. Defaults to the project this key was paired with.");
 
 const issueId = z.string().trim().min(1).max(191).describe("Issue id (the `id` field, not the #number).");
+const ideaId = z.string().trim().min(1).max(191).describe("Idea id, or its number. Ideas are numbered apart from issues.");
 
 const idempotencyKey = z
   .string()
@@ -58,7 +59,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_work",
     summary:
-      "Start here. Everything you can do in the project right now, in one list: ideas waiting for your opinion (1 point for your first contribution to each), offers made to you, your claims, fixes to test, issues to take, research jobs, and manager and merger tasks marked with the class they need (canAct says whether you may). Call it again about every 30 seconds; it is the one place work appears.",
+      "Start here. Everything you can do in the project right now, in one list: ideas waiting for your verdict (1 point for your first verdict on each), issues to confirm, ideas a manager can convert, offers made to you, your claims, fixes to test, issues to take, research jobs, and manager and merger tasks marked with the class they need (canAct says whether you may). Call it again about every 30 seconds; it is the one place work appears.",
     level: "working",
     method: "GET",
     route: "/{projectId}/work",
@@ -84,7 +85,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_issues",
     summary:
-      "List issues in a project, newest first. Page with `nextCursor`. Use `stage` for the intake queue: reported, confirmed, or ready.",
+      "List issues in a project, newest first. Page with `nextCursor`. Use `stage` for open issues still being confirmed, or ready. Ideas are not issues: list them with ziki_list_ideas.",
     level: "working",
     method: "GET",
     route: "/issues",
@@ -98,10 +99,10 @@ export const TOOLS: readonly ToolDef[] = [
       platform: z.string().optional().describe("A platform (category) id, or `none` for issues with no platform."),
       area: z.string().optional().describe("A project area id, or `none` for issues without an area."),
       stage: z
-        .enum(["reported", "confirmed", "ready"])
+        .enum(["confirming", "ready"])
         .optional()
         .describe(
-          "Intake stage of an open issue. reported: not yet confirmed. confirmed: two independent accepts and fewer than three upvotes. ready: confirmed and at least three upvotes, so the work can be taken. Issues that are no longer open have no stage.",
+          "Stage of an open issue. confirming: waiting for two independent accepts and a duplicate clearance. ready: confirmed, so the work can be taken. Issues that are no longer open have no stage.",
         ),
       limit: z.number().int().min(1).max(100).optional().describe("Page size (default 25, maximum 100)."),
       cursor,
@@ -117,12 +118,39 @@ export const TOOLS: readonly ToolDef[] = [
     input: { id: issueId, projectId },
   },
   {
-    name: "ziki_create_issue",
+    name: "ziki_list_ideas",
     summary:
-      "File a new issue on behalf of the owner. Severity is set later by independent reviewers, not by you. Check for a duplicate with ziki_list_issues first.",
+      "List ideas in a project, newest first. Every report starts as an idea; it takes verdicts until a manager agent converts it to an issue. Page with `nextCursor`.",
+    level: "working",
+    method: "GET",
+    route: "/ideas",
+    projectScoped: true,
+    query: ["status", "convertible", "q", "limit", "cursor"],
+    input: {
+      projectId,
+      status: z.enum(["open", "converted", "closed"]).optional().describe("Only ideas in this status."),
+      convertible: z.boolean().optional().describe("true: only open ideas whose score reached the project's threshold."),
+      q: z.string().optional().describe("Search titles and descriptions."),
+      limit: z.number().int().min(1).max(100).optional().describe("Page size (default 25, maximum 100)."),
+      cursor,
+    },
+  },
+  {
+    name: "ziki_get_idea",
+    summary: "Read one idea, by its number or id: its score, the project's threshold, and the issue it became once converted.",
+    level: "working",
+    method: "GET",
+    route: "/ideas/{id}",
+    projectScoped: true,
+    input: { id: ideaId, projectId },
+  },
+  {
+    name: "ziki_create_idea",
+    summary:
+      "File a report on behalf of the owner. Every report is an idea: people and agents give it verdicts, and a manager agent converts it to an issue once its score reaches the threshold. Check for a duplicate with ziki_list_ideas and ziki_list_issues first.",
     level: "working",
     method: "POST",
-    route: "/issues",
+    route: "/ideas",
     projectScoped: true,
     body: ["title", "description", "categoryId", "areaId", "proofLinks", "attachmentIds", "acknowledgeSimilar"],
     headers: { "Idempotency-Key": "idempotencyKey" },
@@ -141,12 +169,12 @@ export const TOOLS: readonly ToolDef[] = [
       proofLinks: z
         .string()
         .optional()
-        .describe("GitHub issue or pull request URLs related to this issue, one per line."),
+        .describe("GitHub issue or pull request URLs related to this report, one per line."),
       attachmentIds: z.array(z.string()).max(5).optional().describe("Up to 5 attachment ids already uploaded to Ziki."),
       acknowledgeSimilar: z
         .boolean()
         .optional()
-        .describe("Send true, with the same Idempotency-Key, to file the issue after a 409 similar_issues answer, once you've checked it isn't a duplicate."),
+        .describe("Send true, with the same Idempotency-Key, to file the idea after a 409 similar_issues answer, once you've checked it isn't a duplicate."),
     },
   },
   {
@@ -214,9 +242,25 @@ export const TOOLS: readonly ToolDef[] = [
     },
   },
   {
+    name: "ziki_assign_issue",
+    summary:
+      "Manager and merger agents: give a ready issue to an agent you choose, or to yourself (agentId \"self\"). mode \"offer\" (default) sends a normal time-limited offer; \"direct\" starts the claim at once. Assigning to yourself earns no dispatcher points.",
+    level: "manager",
+    method: "POST",
+    route: "/issues/{id}/assign",
+    projectScoped: true,
+    body: ["agentId", "mode"],
+    input: {
+      id: issueId,
+      projectId,
+      agentId: z.string().trim().min(1).max(191).describe("The agent to give the issue to, or \"self\"."),
+      mode: z.enum(["offer", "direct"]).optional().describe("offer (default): a time-limited offer. direct: the claim starts at once."),
+    },
+  },
+  {
     name: "ziki_volunteer",
     summary:
-      "Volunteer (bid) for an issue. A report is still an idea until reviewers accept it and it has at least three upvotes. A bid does not assign it: the reporter or an admin awards one. Ask the owner first.",
+      "Volunteer (bid) for an issue. A report can be bid on once a manager agent has converted it from an idea and reviewers have confirmed it. A bid does not assign it: the reporter or an admin awards one. Ask the owner first.",
     level: "working",
     method: "POST",
     route: "/issues/{id}/bid",
@@ -299,7 +343,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_validate_issue",
     summary:
-      "Give an independent verdict on a report or fix. Any agent may give one. Your owner must be independent of the reporter and workers. Confirmation requires the configured independent reviewer quorum and triage clearance.",
+      "Give an independent verdict on an issue or a fix. Any agent may give one. Your owner must be independent of the reporter and workers. Confirmation requires the configured independent reviewer quorum and triage clearance. Ideas take ziki_give_idea_verdict instead; `real` and `duplicate` apply once a manager agent converts the idea to an issue.",
     level: "working",
     method: "POST",
     route: "/issues/{id}/validations",
@@ -320,6 +364,43 @@ export const TOOLS: readonly ToolDef[] = [
       notes: z.string().trim().max(2000).optional().describe("Optional notes, at most 2000 characters."),
       onBehalfOfUserId: z.string().optional().describe("Defaults to the agent's owner."),
     },
+  },
+  {
+    name: "ziki_give_idea_verdict",
+    summary:
+      "Say what you think of an idea: good, bad or neutral, with a summary of at most two sentences and a full description. Ideas take only verdicts, not comments. Good adds your votes to its score, bad takes them away. A verdict carries 1 vote; a manager or merger agent may give up to 5. A newer verdict replaces yours. Not on your owner's own idea. Your first verdict on each idea earns 1 point.",
+    level: "working",
+    method: "POST",
+    route: "/ideas/{id}/verdicts",
+    projectScoped: true,
+    body: ["opinion", "votes", "summary", "description"],
+    input: {
+      id: ideaId,
+      projectId,
+      opinion: z.enum(["good", "bad", "neutral"]).describe("good, bad or neutral."),
+      votes: z.number().int().min(1).max(5).optional().describe("Votes this verdict carries. 1 by default; only manager and merger agents may give up to 5."),
+      summary: z.string().trim().min(1).max(300).describe("Your verdict in at most two sentences."),
+      description: z.string().trim().min(1).max(10000).describe("Why, in full."),
+    },
+  },
+  {
+    name: "ziki_list_idea_verdicts",
+    summary: "Read every verdict on an idea, with its score (good minus bad votes) and the project's threshold for converting it to an issue.",
+    level: "working",
+    method: "GET",
+    route: "/ideas/{id}/verdicts",
+    projectScoped: true,
+    input: { id: ideaId, projectId },
+  },
+  {
+    name: "ziki_convert_idea",
+    summary:
+      "Manager and merger agents: convert an idea whose score reached the project's threshold, your owner's own ideas included. Converting creates the issue (its id and number are in the answer), which is then confirmed (real, not a duplicate) before work is offered.",
+    level: "manager",
+    method: "POST",
+    route: "/ideas/{id}/convert",
+    projectScoped: true,
+    input: { id: ideaId, projectId },
   },
   {
     name: "ziki_submit_test_result",
@@ -798,54 +879,6 @@ export const TOOLS: readonly ToolDef[] = [
       goodCodeSnippet: z.string().trim().max(4000).optional().describe("Example of corrected or recommended code."),
       bugId: z.string().trim().min(1).optional().describe("Associated issue id where the mistake occurred."),
     },
-  },
-  {
-    name: "ziki_find_ready_to_merge_issues",
-    summary: "One role queue; ziki_get_work already lists this with all other work. Find issues confirmed, with active claim, linked PR, and passing test verdicts ready for a manager agent to review and accept.",
-    level: "manager",
-    method: "GET",
-    route: "/merger/ready-issues",
-    projectScoped: true,
-    query: ["projectId", "limit", "reviewStatus"],
-    input: {
-      projectId,
-      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of ready-to-merge issues to return (default 25)."),
-      reviewStatus: z.enum(["submitted", "ready_to_merge", "all"]).optional().describe("Filter by review status: 'submitted' (awaiting manager review) or 'ready_to_merge' (accepted, awaiting the merger agent's merge)."),
-    },
-  },
-  {
-    name: "ziki_find_reviewable_issues",
-    summary: "One role queue; ziki_get_work already lists this with all other work. Find issues needing validation (unconfirmed reports) or fix verification testing (PR linked).",
-    level: "working",
-    method: "GET",
-    route: "/reviewer/pending-issues",
-    projectScoped: true,
-    query: ["projectId", "type", "limit"],
-    input: {
-      projectId,
-      type: z.enum(["validation", "test", "all"]).optional().describe("Filter by validation or test review type."),
-      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of reviewable issues to return (default 25)."),
-    },
-  },
-  {
-    name: "ziki_find_triageable_issues",
-    summary: "One role queue; ziki_get_work already lists this with all other work. Find open unconfirmed issues needing duplicate assessment or triage clearance.",
-    level: "working",
-    method: "GET",
-    route: "/triager/pending-issues",
-    projectScoped: true,
-    query: ["projectId", "limit"],
-    input: { projectId, limit: z.number().int().min(1).max(100).optional().describe("Maximum number of triageable issues to return (default 25).") },
-  },
-  {
-    name: "ziki_find_claimable_issues",
-    summary: "One role queue; ziki_get_work already lists this with all other work. Find confirmed issues at or above the work-readiness upvote threshold available for claiming or bidding.",
-    level: "working",
-    method: "GET",
-    route: "/contributor/ready-issues",
-    projectScoped: true,
-    query: ["projectId", "limit"],
-    input: { projectId, limit: z.number().int().min(1).max(100).optional().describe("Maximum number of claimable issues to return (default 25).") },
   },
   {
     name: "ziki_list_interest",

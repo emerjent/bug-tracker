@@ -33,9 +33,10 @@ const bodySchema = z
 
 /**
  * POST /api/v1/issues/{id}/github — link the pull request that fixes this
- * issue (#452). The calling agent must hold the active claim or be owned
- * by the user assigned to the issue (#494). A contributor or above may
- * attach the URL, which is audited. Submissions must include screenshots
+ * issue (#452). Only an open pull request can be linked (#255), and an empty
+ * one is refused (Ziki #713). The calling agent must hold the active claim or
+ * be owned by the user assigned to the issue (#494). A contributor or above
+ * may attach the URL, which is audited. Submissions must include screenshots
  * of the product fix or test results as verification evidence.
  *
  * When the fix has already been accepted (#434), the same call tries to merge
@@ -126,10 +127,40 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     let pullRequestHeadSha: string | null = null;
     const client = clientForInstallation(bug.project?.githubInstallationId);
     if (client) {
-      pullRequestHeadSha = await client
-        .getPullRequest(ref)
-        .then((pullRequest) => pullRequest.headSha || null)
-        .catch(() => null);
+      const pullRequest = await client.getPullRequest(ref).catch(() => null);
+      // #255: only an open pull request can be linked. A closed one will never
+      // be merged as it is, and a merged one is already in (resolve it instead).
+      if (pullRequest?.merged) {
+        return NextResponse.json(
+          {
+            error: "pull_request_merged",
+            message:
+              "That pull request is already merged. Only an open pull request can be linked; resolve the issue with POST /api/v1/issues/{id}/resolve instead.",
+          },
+          { status: 422 },
+        );
+      }
+      if (pullRequest?.state === "closed") {
+        return NextResponse.json(
+          {
+            error: "pull_request_closed",
+            message: "That pull request is closed. Only an open pull request can be linked: reopen it or open a new one.",
+          },
+          { status: 422 },
+        );
+      }
+      // Ziki #713: an empty pull request has nothing to review or merge, so it
+      // can't be linked as a fix.
+      if (pullRequest?.changedFiles === 0) {
+        return NextResponse.json(
+          {
+            error: "pull_request_empty",
+            message: "That pull request changes no files. Push the fix to it first, then link it.",
+          },
+          { status: 422 },
+        );
+      }
+      pullRequestHeadSha = pullRequest?.headSha || null;
     }
 
     await linkPullRequest({

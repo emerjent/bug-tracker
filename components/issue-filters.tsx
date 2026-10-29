@@ -138,15 +138,20 @@ function IssuesSort({ value, onChange }: { value: ReturnType<typeof parseBugSort
 
 /**
  * #1054: the intake stage used to be a sidebar beside the list. It is a
- * filter now, with the same `?stage=` values so old links keep working.
- * Ideas are reports that are not ready to pass on. Issues are.
+ * filter now. An issue is confirmed, then ready. Ideas are not issues: they
+ * have their own tab (#idea-table).
  */
 const STAGE_PARAM = "stage";
 const STAGE_OPTIONS = [
-  { value: "reported", label: "Ideas" },
-  { value: "confirmed", label: "Ideas awaiting upvotes" },
-  { value: "ready", label: "Issues" },
+  { value: "confirming", label: "Requires confirmation" },
+  { value: "ready", label: "Ready" },
 ] as const;
+type StageFilter = (typeof STAGE_OPTIONS)[number]["value"];
+
+/** The `?stage=` choice. Mirrors `parseIssueStageView` in lib/issue-stage, which this client file can't import. */
+function stageFilterValue(raw: string | null): StageFilter | "" {
+  return STAGE_OPTIONS.find((option) => option.value === raw)?.value ?? "";
+}
 
 /** URL params owned by the filter bar. `page` is paging, not a filter. */
 const FILTER_PARAMS = [
@@ -196,7 +201,7 @@ export function IssueFilters({
   areas?: ProjectAreaOption[];
   shortcutsEnabled?: boolean;
   /** Open issues in each intake stage, shown beside the Stage choices (#1054). */
-  stageCounts?: { reported: number; confirmed: number; ready: number };
+  stageCounts?: Record<StageFilter, number>;
   /** Issues-page toolbar; other consumers retain the expanded search field. */
   compact?: boolean;
 }) {
@@ -467,7 +472,7 @@ export function IssueFilters({
   const currentMine = parseMineFilter(params.get("mine")) ?? "";
   const currentMilestone = params.get(MILESTONE_PARAM) ?? "";
 
-  const currentStage = STAGE_OPTIONS.find((option) => option.value === params.get(STAGE_PARAM))?.value ?? "";
+  const currentStage = stageFilterValue(params.get(STAGE_PARAM));
 
   const activeFilterCount = [
     Boolean(currentStage),
@@ -655,7 +660,7 @@ export function IssueFilters({
                   <div>
                     <label htmlFor="stage" className={fieldLabelClass}>Kind</label>
                     <FilterSelect compact={compact} aria-label="Kind" id="stage" className={selectClass} value={currentStage} onValueChange={(value) => update(STAGE_PARAM, value)}>
-                      <option value="">Ideas and issues</option>
+                      <option value="">All issues</option>
                       {STAGE_OPTIONS.map((option) => (
                         <option key={option.value} value={option.value}>{stageCounts ? `${option.label} (${stageCounts[option.value]})` : option.label}</option>
                       ))}

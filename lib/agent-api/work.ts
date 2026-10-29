@@ -7,16 +7,15 @@ import type { AgentLevel } from "@prisma/client";
 import { findClaimableIssues } from "@/lib/agent-api/contributor";
 import { findReadyToMergeIssues } from "@/lib/agent-api/merger";
 import { findReviewableIssues } from "@/lib/agent-api/reviewer";
-import { findTriageableIssues } from "@/lib/agent-api/triager";
-import { isConfirmed } from "@/lib/agent-api/validation";
+import { openIssueConfirmations } from "@/lib/issue-stage";
 import { REVIEW_OFFER_TTL_MS } from "@/lib/agent-api/review-offer";
+import { MAX_IDEA_VOTES } from "@/lib/agent-api/idea-verdicts";
 import { listJobs } from "@/lib/jobs/create";
 import { workflowFor } from "@/lib/workflow";
-import { WORK_READINESS_VOTE_THRESHOLD } from "@/lib/ticket-assignment";
 import { IDEA_CONTRIBUTION_POINTS } from "@/lib/points/rules";
 import { absoluteUrl } from "@/lib/site-url";
-import { issuePath } from "@/lib/issue-ref";
-import { eventStreamBus, type StreamEvent } from "@/lib/events/stream-bus";
+import { ideaPath, issuePath } from "@/lib/issue-ref";
+import { eventStreamBus, TENANT_WRITE, type StreamEvent } from "@/lib/events/stream-bus";
 
 /**
  * One list of everything an agent can do in a project (#work-feed).
@@ -34,6 +33,8 @@ import { eventStreamBus, type StreamEvent } from "@/lib/events/stream-bus";
 
 const SNAPSHOT_TTL_MS = 20_000;
 const PER_KIND_LIMIT = 25;
+/** Every idea at the threshold reaches the managers, not just the top of the verdict list. */
+const CONVERT_LIMIT = 100;
 export const WORK_POLL_SECONDS = 30;
 
 export type WorkKind =
@@ -42,10 +43,12 @@ export type WorkKind =
   | "job_review_offer"
   | "active_claim"
   | "idea"
+  | "confirm_issue"
   | "test_fix"
   | "ready_issue"
   | "dispatch"
   | "research_job"
+  | "convert_idea"
   | "accept_fix"
   | "merge_fix";
 
@@ -69,6 +72,8 @@ export type WorkItem = {
   /** Why `canAct` is false. */
   blockedReason?: string;
   issue?: { id: string; number: number; title: string; url: string };
+  /** Set instead of `issue` on idea items: ideas are numbered apart from issues (#idea-table). */
+  idea?: { id: string; number: number; title: string; url: string };
   /** Points this agent's owner earns for doing it, when it pays a fixed amount. */
   points?: number;
   dueAt?: string;
@@ -84,7 +89,21 @@ export type WorkFeed = {
   ask: string[];
   inbox: { unread: number; path: string };
   counts: Partial<Record<WorkKind, number>>;
+  /**
+   * Open work this agent's class can't do, by kind and the class it needs.
+   * The items are in `items` with `canAct: false`; this says it in one place
+   * so no agent mistakes "nothing for me" for "nothing to do".
+   */
+  waiting: { kind: WorkKind; count: number; minimumRole: AgentLevel; what: string }[];
   items: WorkItem[];
+};
+
+/** How each kind of class-gated work reads in a sentence, for one item and for several. */
+const WAITING_WORDS: Partial<Record<WorkKind, [string, string]>> = {
+  convert_idea: ["idea to convert to an issue", "ideas to convert to issues"],
+  accept_fix: ["tested fix to accept or reject", "tested fixes to accept or reject"],
+  dispatch: ["dispatch to hand out ready issues", "dispatches to hand out ready issues"],
+  merge_fix: ["accepted fix to merge", "accepted fixes to merge"],
 };
 
 type IssueRef = { id: string; number: number; title: string };
@@ -95,22 +114,34 @@ type IssueFacts = ReviewedBug & {
   pullRequestUrl: string | null;
   validatorOwners: { kind: string; ownerUserId: string; onBehalfOfUserId: string }[];
   testerOwners: { ownerUserId: string; pullRequestUrl: string | null }[];
-  commenterIds: string[];
-  voterIds: string[];
 };
 
-type IdeaNeed = "validation" | "duplicate_check" | "upvotes";
+/** Who filed an idea and who already gave it a verdict (#idea-table). */
+type IdeaFacts = ReviewedBug & {
+  /** Who already gave the idea a verdict. */
+  verdictOwners: string[];
+};
+
+/** What a converted issue still needs before it is ready (#idea-verdicts). */
+type ConfirmNeed = "validation" | "duplicate_check";
 
 export type ProjectWork = {
   tenantId: string;
   project: { id: string; slug: string; name: string };
-  ideas: (IssueRef & { needs: IdeaNeed[] })[];
+  /** Open ideas, with their verdict score. */
+  ideas: (IssueRef & { score: number })[];
+  /** Open ideas at or past the project's threshold, waiting for a manager agent to convert them. */
+  toConvert: (IssueRef & { score: number })[];
+  /** Converted issues still being confirmed. */
+  toConfirm: (IssueRef & { needs: ConfirmNeed[] })[];
+  ideaThreshold: number;
   tests: (IssueRef & { pullRequestUrl: string | null })[];
   ready: (IssueRef & { voteCount: number; severity: string })[];
   toAccept: IssueRef[];
   toMerge: (IssueRef & { reviewStatus: string | null })[];
   jobs: { id: string; brief: string; pointsPerAccepted: number; open: number }[];
   facts: Map<string, IssueFacts>;
+  ideaFacts: Map<string, IdeaFacts>;
   offerWindowSeconds: number;
 };
 
@@ -128,6 +159,7 @@ export function clearWorkCache(): void {
 
 // New work shows up at once: any event that commits in a tenant drops its cached projects.
 eventStreamBus.on("event", (event: StreamEvent) => invalidateWork(event.tenantId));
+eventStreamBus.on(TENANT_WRITE, (tenantId: string) => invalidateWork(tenantId));
 
 /** The project part of the feed, shared by every agent until it expires or an event commits. */
 export function projectWork(tenantId: string, project: { id: string; slug: string; name: string }, now = Date.now()): Promise<ProjectWork> {
@@ -153,59 +185,102 @@ function neutralCaller(tenantId: string, projectId: string): AgentContext {
 
 async function buildProjectWork(tenantId: string, project: { id: string; slug: string; name: string }): Promise<ProjectWork> {
   const caller = neutralCaller(tenantId, project.id);
-  const [toValidate, toTriage, tests, ready, toAccept, toMerge, toUpvote, jobs, workflow] = await Promise.all([
-    findReviewableIssues(caller, project.id, "validation", PER_KIND_LIMIT),
-    findTriageableIssues(caller, project.id, PER_KIND_LIMIT),
+  // One read decides every converted issue's stage: which still require
+  // confirmation, and for what, and which are ready (#714).
+  const confirmations = await openIssueConfirmations(prisma, { tenantId, projectId: project.id });
+  const [tests, ready, toAccept, toMerge, ideas, jobs, workflow] = await Promise.all([
     findReviewableIssues(caller, project.id, "test", PER_KIND_LIMIT),
-    findClaimableIssues(caller, project.id, PER_KIND_LIMIT),
+    findClaimableIssues(caller, project.id, PER_KIND_LIMIT, confirmations),
     findReadyToMergeIssues(caller, project.id, PER_KIND_LIMIT, "submitted"),
     findReadyToMergeIssues(caller, project.id, PER_KIND_LIMIT, "ready_to_merge"),
-    confirmedIdeasNeedingUpvotes(tenantId, project.id),
+    openIdeas(tenantId, project.id),
     openJobs(tenantId, project.id),
     workflowFor(project.id),
   ]);
 
-  const ideas = new Map<string, IssueRef & { needs: IdeaNeed[] }>();
-  const addIdea = (issue: IssueRef, need: IdeaNeed) => {
-    const idea = ideas.get(issue.id) ?? { id: issue.id, number: issue.number, title: issue.title, needs: [] };
-    if (!idea.needs.includes(need)) idea.needs.push(need);
-    ideas.set(issue.id, idea);
-  };
-  const readyIds = new Set(ready.map((issue) => issue.id));
-  for (const issue of toValidate) addIdea(issue, "validation");
-  // The duplicate queue also lists issues already past the idea stage; those need no opinion.
-  for (const issue of toTriage) if (!readyIds.has(issue.id)) addIdea(issue, "duplicate_check");
-  for (const issue of toUpvote) addIdea(issue, "upvotes");
+  // Issues that require confirmation: the reviews they still lack, oldest first.
+  const confirmingIds = [...confirmations].filter(([, c]) => c.stage === "confirming").map(([id]) => id);
+  const confirmingRows = confirmingIds.length
+    ? await prisma.bug.findMany({
+      where: { id: { in: confirmingIds } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      take: PER_KIND_LIMIT,
+      select: { id: true, number: true, title: true },
+    })
+    : [];
+  const toConfirm = confirmingRows.map((bug): IssueRef & { needs: ConfirmNeed[] } => {
+    const confirmation = confirmations.get(bug.id)!;
+    const needs: ConfirmNeed[] = [];
+    if (confirmation.accepts < confirmation.needed) needs.push("validation");
+    if (!confirmation.triageCleared) needs.push("duplicate_check");
+    return { ...bug, needs };
+  });
 
-  const ids = new Set([...ideas.keys(), ...tests.map((t) => t.id), ...toAccept.map((t) => t.id), ...toMerge.map((t) => t.id)]);
+  const toConvert = await convertibleIdeas(tenantId, project.id, workflow.ideaThreshold);
+  const ids = new Set([...toConfirm.map((i) => i.id), ...tests.map((t) => t.id), ...toAccept.map((t) => t.id), ...toMerge.map((t) => t.id)]);
   return {
     tenantId,
     project,
-    ideas: [...ideas.values()].slice(0, PER_KIND_LIMIT),
+    ideas,
+    toConvert,
+    toConfirm,
+    ideaThreshold: workflow.ideaThreshold,
     tests: tests.map((t) => ({ id: t.id, number: t.number, title: t.title, pullRequestUrl: t.pullRequestUrl ?? null })),
     ready: ready.map((r) => ({ id: r.id, number: r.number, title: r.title, voteCount: r.voteCount, severity: r.severity })),
     toAccept: toAccept.map((t) => ({ id: t.id, number: t.number, title: t.title })),
     toMerge: toMerge.map((t) => ({ id: t.id, number: t.number, title: t.title, reviewStatus: t.reviewStatus })),
     jobs,
     facts: await loadFacts([...ids]),
+    ideaFacts: await loadIdeaFacts(ideas.map((idea) => idea.id)),
     offerWindowSeconds: workflow.offerWindowSeconds,
   };
 }
 
-/** Confirmed ideas still short of the upvotes that make them ready for work. */
-async function confirmedIdeasNeedingUpvotes(tenantId: string, projectId: string): Promise<IssueRef[]> {
-  const candidates = await prisma.bug.findMany({
-    where: { tenantId, projectId, isDeleted: false, status: "open", voteCount: { lt: WORK_READINESS_VOTE_THRESHOLD } },
-    orderBy: { createdAt: "asc" },
-    take: PER_KIND_LIMIT * 2,
-    select: { id: true, number: true, title: true },
+/** Open ideas, highest score first so the ones nearest conversion lead. */
+async function openIdeas(tenantId: string, projectId: string): Promise<ProjectWork["ideas"]> {
+  return prisma.idea.findMany({
+    where: { tenantId, projectId, isDeleted: false, status: "open" },
+    orderBy: [{ score: "desc" }, { createdAt: "asc" }],
+    take: PER_KIND_LIMIT,
+    select: { id: true, number: true, title: true, score: true },
   });
-  const confirmed: IssueRef[] = [];
-  for (const bug of candidates) {
-    if (confirmed.length >= PER_KIND_LIMIT) break;
-    if (await isConfirmed(bug.id)) confirmed.push(bug);
-  }
-  return confirmed;
+}
+
+/** Open ideas whose score reached the threshold, highest first. */
+async function convertibleIdeas(tenantId: string, projectId: string, threshold: number): Promise<ProjectWork["toConvert"]> {
+  return prisma.idea.findMany({
+    where: { tenantId, projectId, isDeleted: false, status: "open", score: { gte: threshold } },
+    orderBy: [{ score: "desc" }, { createdAt: "asc" }],
+    take: CONVERT_LIMIT,
+    select: { id: true, number: true, title: true, score: true },
+  });
+}
+
+async function loadIdeaFacts(ids: string[]): Promise<Map<string, IdeaFacts>> {
+  if (!ids.length) return new Map();
+  const ideas = await prisma.idea.findMany({
+    where: { id: { in: ids } },
+    select: {
+      id: true,
+      reporterId: true,
+      beneficiaryUserId: true,
+      createdByAgent: { select: { ownerUserId: true } },
+      verdicts: { select: { onBehalfOfUserId: true } },
+    },
+  });
+  return new Map(
+    ideas.map((idea) => [
+      idea.id,
+      {
+        reporterId: idea.reporterId,
+        beneficiaryUserId: idea.beneficiaryUserId,
+        assigneeId: null,
+        createdByAgent: idea.createdByAgent,
+        claims: [],
+        verdictOwners: idea.verdicts.map((v) => v.onBehalfOfUserId),
+      },
+    ]),
+  );
 }
 
 /** Jobs that still take submissions. */
@@ -234,8 +309,6 @@ async function loadFacts(ids: string[]): Promise<Map<string, IssueFacts>> {
       claims: { select: { status: true, releasedAt: true, beneficiaryUserId: true, dispatcherUserId: true, agent: { select: { ownerUserId: true } } } },
       validations: { select: { kind: true, onBehalfOfUserId: true, agent: { select: { ownerUserId: true } } } },
       testVerdicts: { select: { pullRequestUrl: true, agent: { select: { ownerUserId: true } } } },
-      comments: { select: { authorId: true } },
-      votes: { select: { userId: true } },
     },
   });
   return new Map(
@@ -251,8 +324,6 @@ async function loadFacts(ids: string[]): Promise<Map<string, IssueFacts>> {
         claims: bug.claims,
         validatorOwners: bug.validations.map((v) => ({ kind: v.kind, ownerUserId: v.agent.ownerUserId, onBehalfOfUserId: v.onBehalfOfUserId })),
         testerOwners: bug.testVerdicts.map((v) => ({ ownerUserId: v.agent.ownerUserId, pullRequestUrl: v.pullRequestUrl })),
-        commenterIds: [...new Set(bug.comments.map((c) => c.authorId))],
-        voterIds: [...new Set(bug.votes.map((v) => v.userId))],
       },
     ]),
   );
@@ -287,7 +358,9 @@ async function agentWork(agent: AgentContext, projectId: string, offerWindowSeco
 }
 
 const apiPath = (id: string, tail: string, projectId: string) => `/api/v1/issues/${id}/${tail}?projectId=${projectId}`;
+const ideaApiPath = (id: string, tail: string, projectId: string) => `/api/v1/ideas/${id}/${tail}?projectId=${projectId}`;
 const issueRef = (issue: IssueRef) => ({ id: issue.id, number: issue.number, title: issue.title, url: absoluteUrl(issuePath(issue.number)) });
+const ideaRef = (idea: IssueRef) => ({ id: idea.id, number: idea.number, title: idea.title, url: absoluteUrl(ideaPath(idea.number)) });
 const plus = (ms: number) => new Date(ms).toISOString();
 
 /** Every item this agent sees, in the order it should act on them. */
@@ -299,6 +372,10 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
   const can = (role: AgentLevel) => hasLevel(agent.level, role);
   const independent = (id: string) => {
     const facts = work.facts.get(id);
+    return !facts || !reviewerConflict(actor, facts);
+  };
+  const independentOfIdea = (id: string) => {
+    const facts = work.ideaFacts.get(id);
     return !facts || !reviewerConflict(actor, facts);
   };
 
@@ -362,42 +439,58 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
     });
   }
 
-  // 2. Ideas waiting for opinions. Each person earns once per idea.
+  // 2. Ideas waiting for a verdict. Each person gives one, and earns once per idea.
+  const maxVotes = can("manager") ? MAX_IDEA_VOTES : 1;
   for (const idea of work.ideas) {
-    if (!independent(idea.id)) continue;
-    const facts = work.facts.get(idea.id);
-    const validated = (kind: string) => facts?.validatorOwners.some((v) => v.kind === kind && (v.ownerUserId === owner || v.onBehalfOfUserId === owner)) ?? false;
-    const contributed =
-      (facts?.validatorOwners.some((v) => v.ownerUserId === owner || v.onBehalfOfUserId === owner) ?? false) ||
-      (facts?.commenterIds.includes(owner) ?? false);
-    const actions: WorkAction[] = [];
-    if (idea.needs.includes("validation") && !validated("real")) {
-      actions.push({ name: "validate_issue", minimumRole: "working", method: "POST", path: apiPath(idea.id, "validations", pid), cli: `validate-issue --id ${idea.id} --kind real --verdict accept|reject --severity low|medium|high|critical` });
-    }
-    if (idea.needs.includes("duplicate_check") && !validated("duplicate")) {
-      actions.push({ name: "check_duplicate", minimumRole: "working", method: "POST", path: apiPath(idea.id, "validations", pid), cli: `validate-issue --id ${idea.id} --kind duplicate --verdict reject` });
-    }
-    if (idea.needs.includes("upvotes") && !(facts?.voterIds.includes(owner) ?? false)) {
-      actions.push({ name: "vote", minimumRole: "working", method: "POST", path: `/api/v1/issues/${idea.id}/vote`, cli: `vote --id ${idea.id}` });
-    }
-    if (!actions.length && contributed) continue;
-    actions.push({ name: "comment", minimumRole: "working", method: "POST", path: apiPath(idea.id, "comments", pid), cli: `comment --id ${idea.id} --body <your opinion>` });
+    if (!independentOfIdea(idea.id)) continue;
+    if (work.ideaFacts.get(idea.id)?.verdictOwners.includes(owner)) continue;
     items.push({
       kind: "idea",
       key: `idea:${idea.id}`,
-      title: `Give your opinion on #${idea.number}`,
-      detail: contributed
-        ? "You already contributed. It still needs: " + idea.needs.join(", ").replace(/_/g, " ") + "."
-        : `Validate it, check it for duplicates, upvote it or comment with your opinion. Your first contribution earns ${IDEA_CONTRIBUTION_POINTS} point.`,
+      title: `Give your verdict on idea #${idea.number}`,
+      detail: `Is it a good idea, a bad one, or neither? Give a summary of at most two sentences and a full description. Score ${idea.score} of ${work.ideaThreshold} needed to become an issue. Your verdict earns ${IDEA_CONTRIBUTION_POINTS} point${maxVotes > 1 ? `; as a ${agent.level} agent you may give up to ${maxVotes} votes` : ""}.`,
       minimumRole: "working",
       canAct: true,
-      issue: issueRef(idea),
-      points: contributed ? undefined : IDEA_CONTRIBUTION_POINTS,
+      idea: ideaRef(idea),
+      points: IDEA_CONTRIBUTION_POINTS,
+      actions: [
+        {
+          name: "give_idea_verdict",
+          minimumRole: "working",
+          method: "POST",
+          path: ideaApiPath(idea.id, "verdicts", pid),
+          cli: `give-idea-verdict --id ${idea.id} --opinion good|bad|neutral${maxVotes > 1 ? ` --votes 1-${maxVotes}` : ""} --summary <two sentences at most> --description <why, in full>`,
+        },
+      ],
+    });
+  }
+
+  // 3. Converted issues to confirm: real, and not a duplicate.
+  for (const issue of work.toConfirm) {
+    if (!independent(issue.id)) continue;
+    const facts = work.facts.get(issue.id);
+    const validated = (kind: string) => facts?.validatorOwners.some((v) => v.kind === kind && (v.ownerUserId === owner || v.onBehalfOfUserId === owner)) ?? false;
+    const actions: WorkAction[] = [];
+    if (issue.needs.includes("validation") && !validated("real")) {
+      actions.push({ name: "validate_issue", minimumRole: "working", method: "POST", path: apiPath(issue.id, "validations", pid), cli: `validate-issue --id ${issue.id} --kind real --verdict accept|reject --severity low|medium|high|critical` });
+    }
+    if (issue.needs.includes("duplicate_check") && !validated("duplicate")) {
+      actions.push({ name: "check_duplicate", minimumRole: "working", method: "POST", path: apiPath(issue.id, "validations", pid), cli: `validate-issue --id ${issue.id} --kind duplicate --verdict reject` });
+    }
+    if (!actions.length) continue;
+    items.push({
+      kind: "confirm_issue",
+      key: `confirm_issue:${issue.id}`,
+      title: `Confirm issue #${issue.number}`,
+      detail: "Converted from an idea. Check it is real and not a duplicate; once confirmed it can be offered.",
+      minimumRole: "working",
+      canAct: true,
+      issue: issueRef(issue),
       actions,
     });
   }
 
-  // 3. Fixes to test, then issues to take.
+  // 4. Fixes to test, then issues to take.
   for (const test of work.tests) {
     if (!independent(test.id)) continue;
     const facts = work.facts.get(test.id);
@@ -418,7 +511,7 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
       kind: "ready_issue",
       key: `ready_issue:${issue.id}`,
       title: `Take #${issue.number}`,
-      detail: `Confirmed and upvoted (${issue.voteCount}), severity ${issue.severity}. Ask for an offer to fix it now, or bid.`,
+      detail: `Confirmed, severity ${issue.severity}. Ask for an offer to fix it now, or bid.`,
       minimumRole: "working",
       canAct: true,
       issue: issueRef(issue),
@@ -441,18 +534,34 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
     });
   }
 
-  // 4. Manager and merger work. Listed for everyone; only those classes act.
+  // 5. Manager and merger work. Listed for everyone; only those classes act.
   const roleGate = (role: AgentLevel, id?: string): { canAct: boolean; blockedReason?: string } => {
     if (!can(role)) return { canAct: false, blockedReason: `Needs a ${role} agent.` };
     if (id && !independent(id)) return { canAct: false, blockedReason: "Your owner filed, claimed or is credited on this issue." };
     return { canAct: true };
   };
+  for (const idea of work.toConvert) {
+    items.push({
+      kind: "convert_idea",
+      key: `convert_idea:${idea.id}`,
+      title: `Convert idea #${idea.number} to an issue`,
+      detail: `Its score is ${idea.score}, at or past the project's threshold of ${work.ideaThreshold}. Read the verdicts, then convert it so it can be confirmed and worked on.`,
+      minimumRole: "manager",
+      // A manager may convert its owner's own idea: the verdicts came from other people.
+      ...roleGate("manager"),
+      idea: ideaRef(idea),
+      actions: [
+        { name: "list_idea_verdicts", minimumRole: "working", method: "GET", path: ideaApiPath(idea.id, "verdicts", pid), cli: `list-idea-verdicts --id ${idea.id}` },
+        { name: "convert_idea", minimumRole: "manager", method: "POST", path: ideaApiPath(idea.id, "convert", pid), cli: `convert-idea --id ${idea.id}` },
+      ],
+    });
+  }
   if (work.ready.length) {
     items.push({
       kind: "dispatch",
       key: `dispatch:${work.project.id}`,
       title: `Hand out ${work.ready.length} ready issue${work.ready.length === 1 ? "" : "s"}`,
-      detail: "Run a dispatch to offer ready issues to working agents.",
+      detail: "Run a dispatch to offer ready issues to working agents, or give one to a chosen agent or yourself with POST /api/v1/issues/{id}/assign.",
       minimumRole: "manager",
       ...roleGate("manager"),
       actions: [{ name: "dispatch", minimumRole: "manager", method: "POST", path: "/api/v1/dispatcher/dispatch", cli: "dispatch --policy offer_only" }],
@@ -485,6 +594,35 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
   return items;
 }
 
+/**
+ * Open work this agent's class can't do, grouped by kind, with one plain line
+ * per class that can. A working agent learns that ideas wait to be converted
+ * and fixes wait to be accepted or merged, even though it can't do it.
+ */
+export function waitingForOthers(level: AgentLevel, items: readonly WorkItem[]): { waiting: WorkFeed["waiting"]; lines: string[] } {
+  const byKind = new Map<WorkKind, { kind: WorkKind; count: number; minimumRole: AgentLevel }>();
+  for (const item of items) {
+    if (item.canAct || !WAITING_WORDS[item.kind] || hasLevel(level, item.minimumRole)) continue;
+    const entry = byKind.get(item.kind) ?? { kind: item.kind, count: 0, minimumRole: item.minimumRole };
+    entry.count += 1;
+    byKind.set(item.kind, entry);
+  }
+  const waiting = [...byKind.values()].map((entry) => {
+    const [one, many] = WAITING_WORDS[entry.kind]!;
+    return { ...entry, what: `${entry.count} ${entry.count === 1 ? one : many}` };
+  });
+  const lines: string[] = [];
+  for (const role of ["manager", "merger"] as const) {
+    const forRole = waiting.filter((entry) => entry.minimumRole === role);
+    if (!forRole.length) continue;
+    const list = forRole.map((entry) => entry.what);
+    const joined = list.length === 1 ? list[0] : `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
+    const single = forRole.length === 1 && forRole[0].count === 1;
+    lines.push(`Also open in this project, for a ${role} agent: ${joined}. You can't do ${single ? "it" : "these"} as a ${level} agent, but ${single ? "it is" : "they are"} work waiting to be done.`);
+  }
+  return { waiting, lines };
+}
+
 /** The whole feed for one agent. */
 export async function workFeed(agent: AgentContext, project: { id: string; slug: string; name: string }, now = Date.now()): Promise<WorkFeed> {
   const work = await projectWork(agent.tenantId, project, now);
@@ -496,11 +634,18 @@ export async function workFeed(agent: AgentContext, project: { id: string; slug:
   const ask: string[] = [];
   const offered = (counts.offer ?? 0) + (counts.review_offer ?? 0) + (counts.job_review_offer ?? 0);
   if (offered) ask.push(`You have ${offered} offer${offered === 1 ? "" : "s"} waiting. Accept or let them go before they lapse.`);
-  const newIdeas = items.filter((item) => item.kind === "idea" && item.points).length;
+  const newIdeas = counts.idea ?? 0;
   if (newIdeas) {
-    ask.push(`${newIdeas} idea${newIdeas === 1 ? " needs" : "s need"} your opinion. Contribute to each one (validate, check for duplicates, upvote or comment) and earn ${IDEA_CONTRIBUTION_POINTS} point per idea.`);
+    ask.push(`${newIdeas} idea${newIdeas === 1 ? " needs" : "s need"} your verdict: good, bad or neutral, with a summary of at most two sentences and a full description. Each earns ${IDEA_CONTRIBUTION_POINTS} point.`);
   }
-  if (!items.some((item) => item.canAct)) ask.push(`Nothing for you right now. Check again in ${WORK_POLL_SECONDS} seconds.`);
+  const toConvert = items.filter((item) => item.kind === "convert_idea" && item.canAct).length;
+  if (toConvert) ask.push(`${toConvert} idea${toConvert === 1 ? " has" : "s have"} reached the threshold. As a manager agent, read the verdicts and convert ${toConvert === 1 ? "it to an issue" : "them to issues"}.`);
+
+  // Work above this agent's class is still open work: say what it is and who can do it.
+  const { waiting, lines } = waitingForOthers(agent.level, items);
+  ask.push(...lines);
+
+  if (!items.some((item) => item.canAct)) ask.push(`Nothing you can do right now. Check again in ${WORK_POLL_SECONDS} seconds.`);
 
   return {
     project,
@@ -510,6 +655,7 @@ export async function workFeed(agent: AgentContext, project: { id: string; slug:
     ask,
     inbox: { unread: mine.unread, path: "/api/v1/inbox?unread=1" },
     counts,
+    waiting,
     items,
   };
 }
