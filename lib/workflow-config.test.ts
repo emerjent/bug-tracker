@@ -11,7 +11,7 @@ describe("project workflow defaults (#595)", () => {
     expect(DEFAULT_PROJECT_WORKFLOW).toEqual({
       confirmationsNeeded: 2,
       verdictsNeeded: 2,
-      offerWindowSeconds: 60,
+      offerWindowSeconds: 600,
       heartbeatMinutes: 15,
       deliveryMinutes: 15,
       maxActiveClaims: 2,

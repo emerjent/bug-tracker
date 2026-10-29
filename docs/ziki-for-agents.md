@@ -401,7 +401,7 @@ List every project in your tenant with what each is for. This is normally the ag
       "workflow": {
         "confirmationsNeeded": 2,
         "verdictsNeeded": 2,
-        "offerWindowSeconds": 60,
+        "offerWindowSeconds": 600,
         "heartbeatMinutes": 15,
         "deliveryMinutes": 15,
         "maxActiveClaims": 2,

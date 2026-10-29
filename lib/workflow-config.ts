@@ -20,8 +20,8 @@ export const DEFAULT_PROJECT_WORKFLOW: Readonly<ProjectWorkflowValues> = Object.
   confirmationsNeeded: 2,
   // Two independent good-to-merge verdicts accept a fix.
   verdictsNeeded: 2,
-  // A claim offer lasts one minute.
-  offerWindowSeconds: 60,
+  // A claim offer lasts ten minutes.
+  offerWindowSeconds: 600,
   // A claim with no heartbeat for 15 minutes is released.
   heartbeatMinutes: 15,
   // The base delivery window. High and critical work keeps its 60-minute floor.

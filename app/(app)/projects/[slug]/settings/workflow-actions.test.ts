@@ -98,7 +98,10 @@ describe("updateProjectWorkflowAction (#595)", () => {
         projectId: "project-1",
         actorUserId: "admin",
         action: "workflow.updated",
-        changes: { confirmationsNeeded: { from: 2, to: 3 } },
+        changes: {
+          confirmationsNeeded: { from: 2, to: 3 },
+          offerWindowSeconds: { from: 600, to: 60 },
+        },
       }),
     });
     expect(invalidateWorkflow).toHaveBeenCalledWith("project-1");
@@ -108,7 +111,7 @@ describe("updateProjectWorkflowAction (#595)", () => {
   it("does not audit or invalidate an unchanged save", async () => {
     findFirst.mockResolvedValue({ id: "project-1", slug: "web", workflow: DEFAULT_PROJECT_WORKFLOW });
     await expect(
-      updateProjectWorkflowAction(undefined, form({ confirmationsNeeded: 2 })),
+      updateProjectWorkflowAction(undefined, form({ confirmationsNeeded: 2, offerWindowSeconds: 600 })),
     ).resolves.toEqual({ ok: true });
     expect(transaction).not.toHaveBeenCalled();
     expect(invalidateWorkflow).not.toHaveBeenCalled();
