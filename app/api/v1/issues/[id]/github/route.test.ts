@@ -177,6 +177,43 @@ describe("POST /api/v1/issues/[id]/github (#452)", () => {
     expect(mocks.merge).not.toHaveBeenCalled();
   });
 
+  it("lets an agent owned by the assigned user link the pull request without a claim (#494)", async () => {
+    db.issueClaim.findFirst.mockResolvedValue(null);
+    db.bug.findFirst.mockResolvedValue({
+      id: "bug1",
+      projectId: "proj-1",
+      pullRequestUrl: null,
+      assigneeId: agent.ownerId,
+      project: { repoUrl: "https://github.com/zedu/web", githubInstallationId: null },
+    });
+    mocks.merge.mockResolvedValue({ status: 409, merged: false, reason: "not_accepted", message: "no" });
+
+    const response = await POST(request({ pullRequestUrl: PR_URL }), params);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ linked: true, merged: false, reason: "not_accepted" });
+    expect(db.bug.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "bug1" },
+        data: expect.objectContaining({ pullRequestUrl: PR_URL }),
+      }),
+    );
+  });
+
+  it("refuses an agent owned by someone other than the assignee when there is no claim (#494)", async () => {
+    db.issueClaim.findFirst.mockResolvedValue(null);
+    db.bug.findFirst.mockResolvedValue({
+      id: "bug1",
+      projectId: "proj-1",
+      pullRequestUrl: null,
+      assigneeId: "other-user",
+      project: { repoUrl: "https://github.com/zedu/web", githubInstallationId: null },
+    });
+
+    const response = await POST(request({ pullRequestUrl: PR_URL }), params);
+    expect(response.status).toBe(409);
+    expect(db.bug.update).not.toHaveBeenCalled();
+  });
+
   it("lets an accepted review-offer holder link the pull request when none is linked (#539)", async () => {
     db.issueClaim.findFirst.mockResolvedValue(null);
     db.reviewOffer.findFirst.mockResolvedValue({ id: "offer-1" });

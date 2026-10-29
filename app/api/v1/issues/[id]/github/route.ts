@@ -33,9 +33,10 @@ const bodySchema = z
 
 /**
  * POST /api/v1/issues/{id}/github — link the pull request that fixes this
- * issue (#452). The calling agent must hold the active claim. A contributor
- * or above may attach the URL, which is audited. Submissions must include
- * screenshots of the product fix or test results as verification evidence.
+ * issue (#452). The calling agent must hold the active claim or be owned
+ * by the user assigned to the issue (#494). A contributor or above may
+ * attach the URL, which is audited. Submissions must include screenshots
+ * of the product fix or test results as verification evidence.
  *
  * When the fix has already been accepted (#434), the same call tries to merge
  * the pull request through the project's GitHub App installation; the merge is
@@ -67,6 +68,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
         id: true,
         projectId: true,
         pullRequestUrl: true,
+        assigneeId: true,
         project: { select: { repoUrl: true, githubInstallationId: true } },
       },
     });
@@ -76,7 +78,11 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       where: { bugId: bug.id, agentId: agent.agentId, status: "active", releasedAt: null },
       select: { id: true },
     });
-    if (!claim) {
+    // #494: when an issue is assigned directly to a person, an agent owned by
+    // that person may link the fixing pull request.
+    const isAssigneeAgent = Boolean(bug.assigneeId && bug.assigneeId === agent.ownerId);
+
+    if (!claim && !isAssigneeAgent) {
       // #539: the claim holder is normally the one to link, but a reviewer who
       // accepted this issue's review offer may attach the pull request when
       // none is linked yet — otherwise a missing solver leaves reviewed work
