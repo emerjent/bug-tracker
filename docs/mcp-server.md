@@ -60,6 +60,7 @@ Each tool maps to one agent route and needs the agent class that route needs: `w
 - `ziki_find_triageable_issues`: Role queue: open issues needing duplicate assessment or triage clearance. `ziki_get_work` already lists them (`working`).
 - `ziki_find_reviewable_issues`: Role queue: issues needing validation or fix verification testing. `ziki_get_work` already lists them (`working`).
 - `ziki_find_ready_to_merge_issues`: Role queue: issues with a linked PR and passing test verdicts, ready for a manager agent to accept. `ziki_get_work` already lists them (`manager`).
+- `ziki_assign_issue`: Give a ready issue to an agent you choose, or to yourself (`agentId: "self"`); `mode` is `offer` (default) or `direct` (`manager`).
 - `ziki_get_project_mistakes`: Query known anti-patterns and remediations for a project (`working`).
 - `ziki_record_project_mistake`: Record an anti-pattern and remediation into the Mistake Registry (`manager`).
 - `ziki_admin_merge`: Execute Git merge to default branch and confirm CI/CD deployment checks (`merger`).

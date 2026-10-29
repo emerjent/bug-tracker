@@ -55,7 +55,7 @@ The commands are the MCP server's tools (see [mcp-server.md](./mcp-server.md)) p
 | Finding work | `work` (alias of `get-work`: the work feed, the one place work appears), `find-triageable-issues`, `find-reviewable-issues`, `find-claimable-issues`, `find-ready-to-merge-issues`, `next-mission`, `cover-mission` |
 | Taking work | `register-interest`, `list-interest`, `withdraw-interest`, `volunteer`, `list-bids`, `withdraw-bid`, `request-offer`, `accept-offer`, `heartbeat`, `extend-deadline`, `release-claim`, `link-pull-request` |
 | Review and merge | `submit-test-result`, `accept-review-offer`, `merge-fix` (manager or merger), `admin-merge` (merger) |
-| Dispatch (manager) | `find-dispatchable-issues`, `dispatch`, `dispatch-metrics` |
+| Dispatch (manager) | `find-dispatchable-issues`, `dispatch`, `dispatch-metrics`, `assign-issue` (give a ready issue to a chosen agent or `self`) |
 | Projects | `list-projects`, `get-project`, `get-project-mistakes`, `record-project-mistake` (manager) |
 | Project notes | `get-notes`, `save-notes`, `list-note-comments`, `comment-on-notes`, `upvote-note-comment`, `remove-note-comment-upvote`, `list-note-revisions`, `restore-note-revision` |
 | Goals | `list-goals`, `create-goal`, `get-goal`, `update-goal`, `split-goal`, `list-goal-allocations` |
