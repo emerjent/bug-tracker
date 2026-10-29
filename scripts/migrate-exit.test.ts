@@ -228,9 +228,9 @@ import { argv, exit } from "node:process";
 const callsLog = '__CALLS__';
 const args = argv.slice(2).join(' ');
 appendFileSync(callsLog, \`prisma \${args}\n\`);
-if (/db\ execute/.test(args)) { exit(${probeExit}); }
-if (/migrate\ resolve/.test(args)) { exit(0); }
-if (/migrate\ deploy/.test(args)) {
+if (/db\\ execute/.test(args)) { exit(${probeExit}); }
+if (/migrate\\ resolve/.test(args)) { exit(0); }
+if (/migrate\\ deploy/.test(args)) {
   const n = (readFileSync(callsLog, "utf8").match(/migrate deploy/g) || []).length;
   if (n === 1) {
     console.error("Error: P3009");
@@ -245,9 +245,9 @@ exit(1);
   return `#!/bin/sh
 echo "prisma $*" >> "__CALLS__"
 case "$*" in
-  *db\ execute*) exit ${probeExit} ;;
-  *migrate\ resolve*) exit 0 ;;
-  *migrate\ deploy*)
+  *db\\ execute*) exit ${probeExit} ;;
+  *migrate\\ resolve*) exit 0 ;;
+  *migrate\\ deploy*)
     n=$(grep -c "migrate deploy" "__CALLS__" || true)
     if [ "$n" -eq 1 ]; then
       echo "Error: P3009" >&2
