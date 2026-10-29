@@ -662,7 +662,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       ),
       loadOptional<number>("volunteers", 0, () =>
         prisma.issueInterest.count({
-          where: { bugId: id, withdrawnAt: null },
+          where: { bugId: id, withdrawnAt: null, agent: { revokedAt: null } },
         }),
       ),
       loadOptional("pendingApproval", null, () =>
