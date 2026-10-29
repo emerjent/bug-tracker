@@ -15,7 +15,9 @@ import { releaseSchema } from "./offer";
 import { structureInputSchema } from "./structure";
 import { testVerdictBodySchema } from "./test-verdict";
 import { validationBodySchema } from "./validation";
+import { ideaVerdictFields } from "./idea-verdicts";
 import { recordMistakeSchema } from "./mistakes";
+import { assignSchema } from "./assign";
 
 /**
  * The MCP server (packages/mcp-server) builds its tool inputs from its own zod
@@ -24,11 +26,13 @@ import { recordMistakeSchema } from "./mistakes";
  * from the API (#612).
  */
 const ROUTE_SCHEMAS: Record<string, z.ZodType> = {
-  ziki_create_issue: createBugSchema,
+  ziki_assign_issue: assignSchema,
+  ziki_create_idea: createBugSchema,
   ziki_comment: commentSchema,
   ziki_volunteer: bidSchema,
   ziki_extend_deadline: extendSchema,
   ziki_validate_issue: validationBodySchema,
+  ziki_give_idea_verdict: ideaVerdictFields,
   ziki_submit_test_result: testVerdictBodySchema,
   ziki_ask_owner: agentQuestionSchema,
   ziki_escalate: agentEscalationSchema,
@@ -49,13 +53,13 @@ const ROUTE_SCHEMAS: Record<string, z.ZodType> = {
 };
 
 // The agent routes extend the shared issue and comment schemas with attachmentIds, and
-// issue creation with acknowledgeSimilar (lib/agent-api/issues.ts `createSchema`).
+// idea creation with acknowledgeSimilar (lib/agent-api/ideas.ts `createIdeaSchema`).
 const AGENT_LAYER_FIELDS = new Set(["attachmentIds", "acknowledgeSimilar"]);
 
 // Fields on the shared schema that the agent route deliberately does not take (it picks only some of
 // them, and severity is set by reviewers), so a tool must not offer them.
 const NOT_OFFERED_TO_AGENTS: Record<string, readonly string[]> = {
-  ziki_create_issue: ["severity", "typeId", "assigneeId"],
+  ziki_create_idea: ["severity", "typeId", "assigneeId"],
 };
 
 // Fields the route doesn't take from the body: the tool puts them in the path or query.

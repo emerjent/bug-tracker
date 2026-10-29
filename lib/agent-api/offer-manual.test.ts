@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 
 const db = vi.hoisted(() => ({
   $queryRaw: vi.fn(),
@@ -47,6 +47,7 @@ beforeEach(() => {
     status: "open",
     assigneeId: null,
     voteCount: 3,
+    convertedToIssueAt: new Date("2026-10-01T00:00:00Z"),
   });
   db.issueClaim.findFirst.mockResolvedValue(pendingOffer);
   isConfirmed.mockResolvedValue(true);

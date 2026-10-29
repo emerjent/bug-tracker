@@ -48,11 +48,11 @@ describe("merge statuses", () => {
   });
 
   it("lists every review status the issue filter accepts", () => {
-    expect(REVIEW_STATUSES).toEqual(["submitted", "ready_to_merge", "rejected", "merge_blocked", "merge_failed", "merged"]);
+    expect(REVIEW_STATUSES).toEqual(["submitted", "tested", "ready_to_merge", "rejected", "merge_blocked", "merge_failed", "merged"]);
   });
 
   it("keeps a blocked or failed merge at the Ready to merge stage", () => {
-    const issue = { status: "in_progress", pullRequestUrl: "https://github.com/o/r/pull/1", hasClaim: true, ideaAccepted: true };
+    const issue = { status: "in_progress", pullRequestUrl: "https://github.com/o/r/pull/1", hasClaim: true, converted: true, ideaAccepted: true };
     expect(currentDecisionStage({ ...issue, reviewStatus: MERGE_BLOCKED })).toBe("ready");
     expect(currentDecisionStage({ ...issue, reviewStatus: MERGE_FAILED })).toBe("ready");
     expect(currentDecisionStage({ ...issue, reviewStatus: "merged" })).toBe("live");
