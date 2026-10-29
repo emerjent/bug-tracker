@@ -67,6 +67,7 @@ function renderPage(
     ideaVerdicts = undefined as
       | { score: number; threshold: number; votes: { good: number; bad: number; neutral: number } }
       | undefined,
+    openBids = 0,
   } = {},
 ) {
   const starts = stageStarts(list);
@@ -85,6 +86,7 @@ function renderPage(
         pullRequestUrl={pullRequestUrl}
         severity="medium"
         ideaVerdicts={ideaVerdicts}
+        openBids={openBids}
       />
       <StageCommentThread
         bugId="b1"
@@ -150,7 +152,7 @@ describe("IssueProgressReport (#1446)", () => {
     renderPage(decisions, "done");
     fireEvent.click(stageButton(/^Open/));
 
-    expect(summary("Open").getByText("1 Claimed")).toBeInTheDocument();
+    expect(summary("Open").getByText("Quantum won the task for Abuchi.")).toBeInTheDocument();
     expect(screen.getByText("Plain comment after the claim")).toBeInTheDocument();
     expect(screen.getByText("Bid comment")).toBeInTheDocument();
     expect(screen.queryByText("Fix review comment")).not.toBeInTheDocument();
@@ -224,6 +226,46 @@ describe("IssueStageSummary (#186)", () => {
     expect(idea.getByText("1 Rejected")).toBeInTheDocument();
     // Latest is the newest by time, not by list order.
     expect(idea.getByText(/^Latest/)).toHaveTextContent("Otter Reviewer");
+  });
+
+  it("shows who won the Open stage, not its claim history", () => {
+    const released: AgentDecision = {
+      id: "r1",
+      at: "2026-10-22T15:00:00.000Z",
+      kind: "claim_released",
+      agentName: "Vida",
+      personName: "Daniel",
+    };
+    const early = decisions.filter((d) => d.kind === "confirmed" || d.kind === "claimed");
+    renderPage([released, ...early], "open", []);
+    const open = summary("Open");
+    expect(open.getByText("Quantum won the task for Abuchi.")).toBeInTheDocument();
+    expect(open.getByText("Abuchi to submit a pull request")).toBeInTheDocument();
+    expect(open.queryByText(/rejected/i)).not.toBeInTheDocument();
+    expect(open.queryByText(/^Latest/)).not.toBeInTheDocument();
+    expect(open.queryByText(/Claim rejected|Claimed$/)).not.toBeInTheDocument();
+  });
+
+  it("says the Open stage is waiting to pick someone until a bid wins", () => {
+    const released: AgentDecision = {
+      id: "r1",
+      at: "2026-10-22T15:00:00.000Z",
+      kind: "claim_released",
+      agentName: "Vida",
+      personName: "Daniel",
+    };
+    const confirmed = decisions.filter((d) => d.kind === "confirmed");
+    renderPage([...confirmed, released], "open", [], { openBids: 2 });
+    let open = summary("Open");
+    expect(open.getByText("2 bids in. Waiting to pick someone.")).toBeInTheDocument();
+    expect(open.getByText("Someone to pick a bid")).toBeInTheDocument();
+    expect(open.queryByText(/^Latest/)).not.toBeInTheDocument();
+    cleanup();
+
+    renderPage(confirmed, "open", []);
+    open = summary("Open");
+    expect(open.getByText("No bids yet. Waiting to pick someone.")).toBeInTheDocument();
+    expect(open.getByText("An agent to bid on this issue")).toBeInTheDocument();
   });
 
   it("lists testing as pending when a PR is in but nobody has tested it", () => {

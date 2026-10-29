@@ -40,10 +40,18 @@ type SummaryInput = {
   pullRequestUrl: string | null;
   severity: Severity | null;
   confirmation?: ConfirmationProgress | null;
+  /** Bids still waiting for a pick, shown on the Open stage. */
+  openBids?: number;
 };
 
+/** The active claim at the Open stage: the bid that won, or a dispatch. */
+function openWinner(inStage: ReadonlyArray<AgentDecision>) {
+  const claim = [...inStage].reverse().find((d) => d.kind === "claimed");
+  return claim && claim.kind === "claimed" ? claim : null;
+}
+
 /** One sentence on where the stage stands, from its decisions only. */
-export function stageSummaryText({ stage, state, inStage, pullRequestUrl, severity, confirmation }: SummaryInput): string {
+export function stageSummaryText({ stage, state, inStage, pullRequestUrl, severity, confirmation, openBids = 0 }: SummaryInput): string {
   if (state === "todo" && inStage.length === 0) return decisionStageInfo[stage].notReached;
   const count = (test: (d: AgentDecision) => boolean) => inStage.filter(test).length;
   const sentences: string[] = [];
@@ -69,10 +77,12 @@ export function stageSummaryText({ stage, state, inStage, pullRequestUrl, severi
       break;
     }
     case "open": {
-      const claim = [...inStage].reverse().find((d) => d.kind === "claimed");
-      const released = count((d) => d.kind === "claim_released");
-      if (claim && claim.kind === "claimed") sentences.push(`Claimed by ${claim.agentName} for ${claim.personName}.`);
-      if (released) sentences.push(`${plural(released, "claim")} ${released === 1 ? "was" : "were"} rejected.`);
+      // Who won the task, not the claim history; that is under Activity.
+      const winner = openWinner(inStage);
+      if (winner) sentences.push(`${winner.agentName} won the task for ${winner.personName}.`);
+      else if (state === "now" || state === "warn") {
+        sentences.push(`${openBids ? `${plural(openBids, "bid")} in.` : "No bids yet."} Waiting to pick someone.`);
+      }
       break;
     }
     case "done": {
@@ -109,7 +119,7 @@ export function stageSummaryText({ stage, state, inStage, pullRequestUrl, severi
 }
 
 /** What still has to happen at the current stage; nothing for other stages. */
-export function stagePending({ stage, state, inStage, pullRequestUrl, confirmation }: SummaryInput): string[] {
+export function stagePending({ stage, state, inStage, pullRequestUrl, confirmation, openBids = 0 }: SummaryInput): string[] {
   if (state !== "now" && state !== "warn") return [];
   switch (stage) {
     case "idea":
@@ -123,8 +133,9 @@ export function stagePending({ stage, state, inStage, pullRequestUrl, confirmati
       ];
     }
     case "open": {
-      const claim = [...inStage].reverse().find((d) => d.kind === "claimed");
-      return [claim && claim.kind === "claimed" ? `${claim.personName} to submit a pull request` : "An agent to claim this issue"];
+      const winner = openWinner(inStage);
+      if (winner) return [`${winner.personName} to submit a pull request`];
+      return [openBids ? "Someone to pick a bid" : "An agent to bid on this issue"];
     }
     case "done":
       if (state === "warn") return ["Fix the findings and resubmit the pull request", "Fresh verdict from reviewer agents"];
@@ -154,6 +165,7 @@ export function IssueStageSummary({
   severity = null,
   ideaVerdicts,
   confirmation = null,
+  openBids = 0,
 }: {
   decisions: ReadonlyArray<AgentDecision>;
   currentStage: DecisionStage;
@@ -164,6 +176,8 @@ export function IssueStageSummary({
   ideaVerdicts?: { score: number; threshold: number; votes: { good: number; bad: number; neutral: number } };
   /** The issue's confirmation progress, shown on Requires confirmation (#714). */
   confirmation?: ConfirmationProgress | null;
+  /** Bids still waiting for a pick, for the Open stage. */
+  openBids?: number;
 }) {
   const picked = useIssueStage();
   const stage = picked?.stage ?? currentStage;
@@ -171,7 +185,10 @@ export function IssueStageSummary({
   const inStage = decisions
     .filter((decision) => stageOfDecision(decision) === stage)
     .sort((a, b) => timeOf(a) - timeOf(b) || a.id.localeCompare(b.id));
-  const input = { stage, state, inStage, pullRequestUrl, severity, confirmation };
+  const input = { stage, state, inStage, pullRequestUrl, severity, confirmation, openBids };
+  // The Open stage shows who won the task, so no per-claim chips or latest
+  // claim event; the claim history is under Activity.
+  const showHistory = stage !== "open";
   const text = stageSummaryText(input);
   const pending = stagePending(input);
   const chip = STATE_CHIP[state];
@@ -226,7 +243,7 @@ export function IssueStageSummary({
           ) : null}
         </div>
       </div>
-      {tallies.size > 0 ? (
+      {showHistory && tallies.size > 0 ? (
         <div className="mt-2.5 flex flex-wrap gap-1.5">
           {[...tallies].map(([name, tally]) => (
             <span key={name} className={`chip ${tally.tone}`}>
@@ -236,7 +253,7 @@ export function IssueStageSummary({
           ))}
         </div>
       ) : null}
-      {latest ? (
+      {showHistory && latest ? (
         <p className="mb-0 mt-2.5 text-[12.5px] leading-normal text-zk-muted">
           Latest · <b className="font-semibold text-zk-text">{latest.agentName}</b> · {decisionCard(latest).text}{" "}
           <span className="whitespace-nowrap">

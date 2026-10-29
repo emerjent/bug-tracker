@@ -1149,6 +1149,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                       : undefined
                   }
                   confirmation={confirmation}
+                  openBids={bidList.length}
                 />
                 {comments.hiddenThreads > 0 ? (
                   <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-zk-chip px-3 py-2 text-sm text-zk-text2 print:hidden">
