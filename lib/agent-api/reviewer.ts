@@ -1,7 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import type { AgentContext } from "@/lib/agents/require-agent";
 import { requireLevel } from "@/lib/agents/levels";
-import { isConfirmed } from "@/lib/agent-api/validation";
 import { reviewerConflict } from "@/lib/agents/independence";
 
 export type ReviewableIssue = {
@@ -9,107 +8,29 @@ export type ReviewableIssue = {
   number: number;
   title: string;
   projectId: string;
-  /** confirming: a converted issue awaiting confirmation; ready: a confirmed one with a fix to test. */
-  stage: "confirming" | "ready";
-  reviewType: "validation" | "test";
+  /** A confirmed issue with a fix to test. */
+  stage: "ready";
+  reviewType: "test";
   pullRequestUrl?: string | null;
   createdAt: Date;
 };
 
-/** Rows read per query while looking for unconfirmed issues (#714). */
-export const SCAN_BATCH = 100;
-
 /**
- * Scan for issues ready for reviewer validation or PR testing.
+ * Scan for linked fixes that need a test verdict.
  */
 export async function findReviewableIssues(
   agent: AgentContext,
   projectId: string,
-  reviewType: "validation" | "test" | "all" = "all",
+  reviewType: "test" = "test",
   limit = 50,
 ): Promise<ReviewableIssue[]> {
   requireLevel(agent, "working");
 
   const results: ReviewableIssue[] = [];
 
-  // 1. Validation candidates: unconfirmed issues needing confirmation. Most
-  // converted issues are already confirmed, so read in batches until `limit`
-  // unconfirmed ones are found: taking only the oldest `limit` rows and then
-  // dropping the confirmed ones returned nothing once enough old issues were
-  // confirmed (#714).
-  if (reviewType === "validation" || reviewType === "all") {
-    let cursor: string | undefined;
-    for (;;) {
-      const unconfirmedBugs = await prisma.bug.findMany({
-        where: {
-          tenantId: agent.tenantId,
-          projectId,
-          isDeleted: false,
-          status: "open",
-          // Only issues are confirmed; ideas take verdicts (#idea-verdicts).
-          convertedToIssueAt: { not: null },
-          validations: {
-            none: {
-              agentId: agent.agentId,
-            },
-          },
-        },
-        take: SCAN_BATCH,
-        ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-        select: {
-          id: true,
-          number: true,
-          title: true,
-          projectId: true,
-          reporterId: true,
-          beneficiaryUserId: true,
-          createdByAgentId: true,
-          createdByAgent: { select: { ownerUserId: true } },
-          createdAt: true,
-          claims: {
-            where: { status: "active", releasedAt: null },
-            select: { agentId: true, beneficiaryUserId: true, agent: { select: { ownerUserId: true } } },
-          },
-        },
-      });
-
-      for (const bug of unconfirmedBugs) {
-        if (results.length >= limit) break;
-        if (await isConfirmed(bug.id)) continue;
-
-        const reviewed = {
-          reporterId: bug.reporterId,
-          beneficiaryUserId: bug.beneficiaryUserId,
-          createdByAgentId: bug.createdByAgentId,
-          createdByAgent: bug.createdByAgent,
-          claims: bug.claims.map((c) => ({
-            status: "active" as const,
-            releasedAt: null,
-            agentId: c.agentId,
-            beneficiaryUserId: c.beneficiaryUserId,
-            agent: c.agent,
-          })),
-        };
-        if (reviewerConflict({ id: agent.agentId, ownerUserId: agent.ownerId }, reviewed)) continue;
-
-        results.push({
-          id: bug.id,
-          number: bug.number,
-          title: bug.title,
-          projectId: bug.projectId,
-          stage: "confirming",
-          reviewType: "validation",
-          createdAt: bug.createdAt,
-        });
-      }
-      if (results.length >= limit || unconfirmedBugs.length < SCAN_BATCH) break;
-      cursor = unconfirmedBugs[unconfirmedBugs.length - 1].id;
-    }
-  }
-
-  // 2. Test candidates: PR linked, needing goodToMerge test verdicts
-  if (reviewType === "test" || reviewType === "all") {
+  // Test candidates: PR linked, needing goodToMerge test verdicts. Issues to
+  // confirm come from openIssueConfirmations() in the work feed (#714).
+  if (reviewType === "test") {
     const testCandidates = await prisma.bug.findMany({
       where: {
         tenantId: agent.tenantId,

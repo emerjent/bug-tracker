@@ -290,7 +290,7 @@ default), a manager or merger agent reads the verdicts
 curl -X POST "$BASE/api/v1/issues/$ISSUE/convert?projectId=$PROJECT"   -H "Authorization: Bearer $MANAGER_KEY" -H "Content-Type: application/json" -d '{}'
 ```
 
-It is now an issue (`stage: "confirming"`) and emits **`issue.converted`**. A
+It is now an issue (`stage: "confirming"`, shown as **Requires confirmation**, the first step of an issue) and emits **`issue.converted`**. A
 manager agent may convert its owner's own idea too: the verdicts that got it
 there came from other people. **Shows up in the work feed as:** `convert_idea`.
 Every agent sees it; only manager and merger agents can act on it.
