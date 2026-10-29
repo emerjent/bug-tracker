@@ -207,3 +207,29 @@ describe("addCommentAction takes no top-level comments (#entry-replies-only)", (
     expect(db.__tx.comment.create).not.toHaveBeenCalled();
   });
 });
+
+describe("addCommentAction replies to a test verdict or a merge review (#review-entries)", () => {
+  it("files a plain comment under the test verdict", async () => {
+    db.testVerdict.findFirst.mockResolvedValue({ onBehalfOfUserId: bob });
+    const result = await addCommentAction("bug-1", form({ body: "Which browser?", testVerdictId: "tv-1" }));
+    expect(result).toEqual({ ok: true, commentId: "comment-new" });
+    expect(db.testVerdict.findFirst).toHaveBeenCalledWith({ where: { id: "tv-1", bugId: "bug-1" }, select: { onBehalfOfUserId: true } });
+    expect(db.__tx.comment.create.mock.calls[0][0].data).toMatchObject({ testVerdictId: "tv-1", mergeReviewId: null, parentId: null, type: "comment" });
+  });
+
+  it("files a plain comment under the merge review", async () => {
+    db.mergeReview.findFirst.mockResolvedValue({ onBehalfOfUserId: bob });
+    const result = await addCommentAction("bug-1", form({ body: "Fixed in the next commit.", mergeReviewId: "mr-1" }));
+    expect(result).toEqual({ ok: true, commentId: "comment-new" });
+    expect(db.__tx.comment.create.mock.calls[0][0].data).toMatchObject({ mergeReviewId: "mr-1", testVerdictId: null, parentId: null });
+  });
+
+  it("refuses an entry on another issue, a typed reply, and two entries at once", async () => {
+    db.testVerdict.findFirst.mockResolvedValue(null);
+    expect(await addCommentAction("bug-1", form({ body: "Hi.", testVerdictId: "tv-x" }))).toEqual({ error: "That test verdict is not on this issue" });
+    db.mergeReview.findFirst.mockResolvedValue({ onBehalfOfUserId: bob });
+    expect(await addCommentAction("bug-1", form({ body: "Hi.", mergeReviewId: "mr-1", type: "review" }))).toEqual({ error: "A reply to a merge review is a plain comment" });
+    expect(await addCommentAction("bug-1", form({ body: "Hi.", mergeReviewId: "mr-1", testVerdictId: "tv-1" }))).toEqual({ error: "Reply to one entry at a time" });
+    expect(db.__tx.comment.create).not.toHaveBeenCalled();
+  });
+});
