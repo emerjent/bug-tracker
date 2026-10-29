@@ -88,10 +88,12 @@ export async function releaseWorkOfRevokedAgent(
   });
 
   // #510: revoking an agent withdraws its active volunteer interests
-  const withdrawnInterests = await tx.issueInterest.updateMany({
-    where: { agentId, withdrawnAt: null },
-    data: { withdrawnAt: now },
-  });
+  const withdrawnInterests = tx.issueInterest
+    ? await tx.issueInterest.updateMany({
+        where: { agentId, withdrawnAt: null },
+        data: { withdrawnAt: now },
+      })
+    : { count: 0 };
 
   return { releasedClaims, withdrawnBids: withdrawn.count, withdrawnInterests: withdrawnInterests.count, offers };
 }
