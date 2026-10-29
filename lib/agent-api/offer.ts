@@ -134,6 +134,25 @@ export async function offerNext(db: Db, caller: { agentId?: string; tenantId: st
 
   // Lock only the chosen member (#544) instead of looping over every member.
   await db.$queryRaw`SELECT "id" FROM "User" WHERE "id" = ${next.beneficiaryUserId} FOR NO KEY UPDATE`;
+
+  // #666: Re-check that this agent doesn't already hold a pending offer on another issue.
+  // The pre-lock query above filters by pendingOffer, but another concurrent offer
+  // could have been created between that query and this lock. If they already have
+  // a pending offer on a different bug, skip them and let the caller 409 instead of
+  // creating a second pending offer for the same person.
+  const otherPending = await db.issueClaim.findFirst({
+    where: {
+      beneficiaryUserId: next.beneficiaryUserId,
+      status: "offered",
+      releasedAt: null,
+      offeredAt: { gt: new Date(Date.now() - offerWindowMs) },
+      bugId: { not: bug.id },
+    },
+  });
+  if (otherPending) {
+    return null;
+  }
+
   try {
     const claim = await db.issueClaim.create({ data: {
       bugId: bug.id, beneficiaryUserId: next.beneficiaryUserId, agentId: next.agentId, status: "offered", offeredAt: new Date(),
