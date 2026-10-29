@@ -380,7 +380,8 @@ export default async function BugsPage({
     where.redesigns = DESIGN_WHERE;
   }
   // The Ideas tab lists the Idea table, not issues: no issue row matches it.
-  const isIdeasView = statusParam === IDEAS_STATUS && !isDeletedView;
+  const stageParam = toSingleQueryParam(params.stage);
+  const isIdeasView = (statusParam === IDEAS_STATUS || stageParam === "ideas") && !isDeletedView;
   if (isIdeasView) where.id = { in: [] };
   if (statusParam === REJECTED_STATUS && !isDeletedView) {
     where.validations = REJECTED_WHERE;
@@ -459,7 +460,9 @@ export default async function BugsPage({
       console.error("[bugs] issue stage lookup failed", error);
     }
     if (stageView) {
-      const ids = [...stages.entries()].filter(([, stage]) => stage === stageView).map(([id]) => id);
+      const ids = [...stages.entries()]
+        .filter(([, stage]) => stage === stageView)
+        .map(([id]) => id);
       where.id = { in: ids };
       try {
         totalCount = await prisma.bug.count({ where });
