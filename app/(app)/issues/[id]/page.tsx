@@ -713,7 +713,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
   }
   // #idea-verdicts: an idea takes verdicts until a manager agent converts it.
   const isIdea = bug.convertedToIssueAt === null;
-  const ideaVerdicts: IdeaVerdictsData | null = isIdea
+  // A deleted idea has no verdicts to show.
+  const ideaVerdicts: IdeaVerdictsData | null = isIdea && !bug.isDeleted
     ? await loadOptional<IdeaVerdictsData | null>("idea verdicts", null, () =>
         listIdeaVerdicts({ tenantId: bug.tenantId, projectId: bug.projectId }, bug.id),
       )
