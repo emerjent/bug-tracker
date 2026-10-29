@@ -165,6 +165,7 @@ export async function pairAgentAction(
   const tenantId = await currentTenantIdFor(user.id);
 
   if (formData.get("intent") === "approve") {
+    const levelRaw = formData.get("level");
     const result = await approvePairing(
       user,
       code,
@@ -172,7 +173,7 @@ export async function pairAgentAction(
       String(formData.get("projectId") ?? ""),
       tenantId,
       formData.get("instructions") ?? undefined,
-      formData.get("level") ?? undefined,
+      ...(levelRaw !== null && levelRaw !== undefined ? [levelRaw] : []),
     );
     if (!result.ok) return result;
     revalidatePath("/agents");

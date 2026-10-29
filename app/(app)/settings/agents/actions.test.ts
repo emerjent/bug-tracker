@@ -21,6 +21,8 @@ vi.mock("@/lib/agents/pairing", () => ({ approvePairing, findPendingPairing }));
 vi.mock("@/lib/tenant-context", () => ({ currentTenantIdFor: vi.fn(async () => "tenant_1") }));
 vi.mock("@/lib/feature-flags", () => ({ isAgentPlatformEnabled: () => true }));
 vi.mock("@/lib/rate-limit", () => ({ RATE_LIMIT_MESSAGE: "Too fast." }));
+const isTenantAdmin = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("@/lib/agents/membership", () => ({ isTenantAdmin }));
 
 import { pairAgentAction, setAgentBurstAction } from "./actions";
 
@@ -114,6 +116,25 @@ describe("pairAgentAction instructions (#431)", () => {
       "project_1",
       "tenant_1",
       "Owner-edited brief.",
+    );
+  });
+
+  it("passes the owner's approved level to approvePairing (#495)", async () => {
+    approvePairing.mockResolvedValue({ ok: true, name: "Ada's Claude" });
+    const form = new FormData();
+    form.set("code", "ABCD-2345");
+    form.set("intent", "approve");
+    form.set("projectId", "project_1");
+    form.set("level", "working");
+    expect(await pairAgentAction(undefined, form)).toEqual({ ok: true, step: "done", name: "Ada's Claude" });
+    expect(approvePairing).toHaveBeenCalledWith(
+      { id: "ada" },
+      "ABCD-2345",
+      expect.any(Date),
+      "project_1",
+      "tenant_1",
+      undefined,
+      "working",
     );
   });
 });
