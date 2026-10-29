@@ -493,24 +493,24 @@ describe("IssueFilters stage filter (#1054)", () => {
   });
   afterEach(cleanup);
 
-  it("offers Ideas and Issues, with their counts, in the Filter popover", () => {
-    render(<IssueFilters stageCounts={{ reported: 7, confirmed: 2, ready: 4 }} />);
+  it("offers Requires confirmation and Ready, with their counts, in the Filter popover; ideas have their own tab", () => {
+    render(<IssueFilters stageCounts={{ confirming: 2, ready: 4 }} />);
     fireEvent.click(screen.getByRole("button", { name: /^filter/i }));
     const stage = within(screen.getByRole("dialog", { name: "Filters" })).getByLabelText("Kind");
-    expect(within(stage).getByRole("option", { name: "Ideas (7)" })).toBeInTheDocument();
-    expect(within(stage).getByRole("option", { name: "Ideas awaiting upvotes (2)" })).toBeInTheDocument();
-    expect(within(stage).getByRole("option", { name: "Issues (4)" })).toBeInTheDocument();
+    expect(within(stage).getByRole("option", { name: "Requires confirmation (2)" })).toBeInTheDocument();
+    expect(within(stage).getByRole("option", { name: "Ready (4)" })).toBeInTheDocument();
+    expect(within(stage).queryByRole("option", { name: /Ideas/ })).not.toBeInTheDocument();
 
-    fireEvent.change(stage, { target: { value: "reported" } });
-    expect(nav.push).toHaveBeenCalledWith("/issues?stage=reported");
+    fireEvent.change(stage, { target: { value: "ready" } });
+    expect(nav.push).toHaveBeenCalledWith("/issues?stage=ready");
   });
 
-  it("keeps old ?stage= links working, counted and removable", () => {
-    nav.params = new URLSearchParams("stage=confirmed&page=2");
+  it("keeps ?stage= links counted and removable", () => {
+    nav.params = new URLSearchParams("stage=confirming&page=2");
     render(<IssueFilters />);
     expect(screen.getByRole("button", { name: /filter \(1 active\)/i })).toBeInTheDocument();
     const remove = screen.getByRole("button", { name: "Remove stage filter" });
-    expect(remove.parentElement).toHaveTextContent("Kind: Ideas awaiting upvotes");
+    expect(remove.parentElement).toHaveTextContent("Kind: Requires confirmation");
     fireEvent.click(remove);
     expect(nav.push).toHaveBeenCalledWith("/issues");
   });

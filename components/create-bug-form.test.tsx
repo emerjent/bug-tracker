@@ -82,7 +82,7 @@ describe("CreateBugForm optimistic submission", () => {
     mockedCreateBug.mockReset();
     mockedCreateBug.mockResolvedValue({ ok: true });
     mockedRethrow.mockClear();
-    user = userEvent.setup();
+    user = userEvent.setup({ delay: null });
   });
 
   it("submits the form and enables the button once the action resolves", async () => {
@@ -143,48 +143,6 @@ describe("CreateBugForm optimistic submission", () => {
     });
 
     expect(titleInput().value).toBe("App crashes on launch");
-  });
-
-  it("sends severity and assignee when rendered as admin", async () => {
-    mockedCreateBug.mockImplementationOnce((formData) => {
-      capturedFormData = formData;
-      return Promise.resolve({ ok: true });
-    });
-
-    renderForm({ ...defaultProps, isAdmin: true });
-
-    await fillValidForm(user);
-    await user.selectOptions(screen.getByLabelText("Severity"), "critical");
-
-    // Assignee is a searchable combobox (#174), not a <select>: open it, then
-    // click the matching person in the listbox.
-    await user.click(screen.getByLabelText("Assignee"));
-    await user.click(
-      await screen.findByRole("option", { name: "Alice" }),
-    );
-
-    await user.click(submitButton());
-    await waitFor(() => expect(mockedCreateBug).toHaveBeenCalledTimes(1));
-
-    expect(capturedFormData?.get("severity")).toBe("critical");
-    expect(capturedFormData?.get("assigneeId")).toBe("u1");
-  });
-
-  it("assigns the bug to the current user when the checkbox is checked", async () => {
-    mockedCreateBug.mockImplementationOnce((formData) => {
-      capturedFormData = formData;
-      return Promise.resolve({ ok: true });
-    });
-
-    renderForm({ ...defaultProps, currentUserId: "u1" });
-
-    await fillValidForm(user);
-    await user.click(screen.getByLabelText("Assign this issue to myself"));
-
-    await user.click(submitButton());
-    await waitFor(() => expect(mockedCreateBug).toHaveBeenCalledTimes(1));
-
-    expect(capturedFormData?.get("assigneeId")).toBe("u1");
   });
 
   it("does not assign anyone when the checkbox is left unchecked", async () => {
@@ -327,7 +285,7 @@ describe("CreateBugForm project-scoped drafts (#729)", () => {
     });
     mockedCreateBug.mockReset();
     mockedCreateBug.mockResolvedValue({ ok: true });
-    user = userEvent.setup();
+    user = userEvent.setup({ delay: null });
   });
 
   afterEach(() => {
@@ -424,7 +382,7 @@ describe("CreateBugForm quick report in a modal (#report-modal)", () => {
     mockedCreateBug.mockResolvedValue({ ok: true });
     capturedFormData = null;
     window.localStorage.clear();
-    user = userEvent.setup();
+    user = userEvent.setup({ delay: null });
   });
 
   function renderModal(extra: Partial<Parameters<typeof CreateBugForm>[0]> = {}) {

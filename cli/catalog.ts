@@ -20,7 +20,7 @@ const notesProject = z.string().trim().min(1).describe("Project id whose notes t
 const EXTRA_TOOLS: readonly CliTool[] = [
   {
     name: "ziki_vote",
-    summary: "Upvote an issue on behalf of the agent's owner. Three upvotes on a confirmed issue make it ready for work.",
+    summary: "Upvote an issue on behalf of the agent's owner. A manager or merger agent's upvote counts as 5.",
     level: "working",
     method: "POST",
     route: "/issues/{id}/vote",
@@ -51,13 +51,14 @@ const EXTRA_TOOLS: readonly CliTool[] = [
   },
   {
     name: "ziki_structure_idea",
-    summary: "Turn a person's open draft idea into a structured issue: summary, problem, proposed solution, acceptance criteria.",
+    summary: "Rewrite a person's open draft idea (by number or id) into a structured report: summary, problem, proposed solution, acceptance criteria.",
     level: "working",
     method: "POST",
     route: "/ideas/{id}/structure",
-    body: ["title", "summary", "problem", "proposedSolution", "acceptanceCriteria"],
+    body: ["title", "summary", "problem", "proposedSolution", "acceptanceCriteria", "projectId"],
     input: {
-      id: issueId,
+      id: z.string().trim().min(1).max(191).describe("Idea id, or its number."),
+      projectId,
       title: z.string().trim().min(1).optional().describe("New title; keeps the current one when left out."),
       summary: z.string().optional().describe("One-paragraph summary."),
       problem: z.string().optional().describe("The problem the idea solves."),
@@ -78,16 +79,6 @@ const EXTRA_TOOLS: readonly CliTool[] = [
       limit: z.number().int().min(1).max(100).optional().describe("Entries per page (default 25)."),
       cursor: z.string().optional().describe("Cursor from a previous page."),
     },
-  },
-  {
-    name: "ziki_find_dispatchable_issues",
-    summary: "List ready issues a manager agent can dispatch: confirmed, three or more upvotes, no active claim.",
-    level: "manager",
-    method: "GET",
-    route: "/dispatcher/ready-issues",
-    projectScoped: true,
-    query: ["limit"],
-    input: { projectId, limit: z.number().int().min(1).max(100).optional().describe("Maximum issues (default 50).") },
   },
   {
     name: "ziki_dispatch",

@@ -1,26 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { confirmationCount, intakeKind, isConfirmedCount, issueStage, parseIssueStageView } from "./issue-stage";
+import { confirmationCount, isConfirmedCount, issueStage, parseIssueStageView } from "./issue-stage";
 
 const bug = { beneficiaryUserId: "beneficiary", reporterId: "reporter", createdByAgent: null, claims: [] };
 
 describe("issueStage", () => {
-  it("calls every unconfirmed open issue reported, whoever filed it", () => {
-    expect(issueStage({ status: "open", voteCount: 0, confirmed: false })).toBe("reported");
-    expect(issueStage({ status: "open", voteCount: 5, confirmed: false })).toBe("reported");
-  });
-
-  it("calls a confirmed issue with fewer than three upvotes confirmed", () => {
-    expect(issueStage({ status: "open", voteCount: 2, confirmed: true })).toBe("confirmed");
-  });
-
-  it("calls a confirmed issue with three upvotes ready", () => {
-    expect(issueStage({ status: "open", voteCount: 3, confirmed: true })).toBe("ready");
-    expect(issueStage({ status: "open", voteCount: 8, confirmed: true })).toBe("ready");
+  it("calls an open issue confirming until reviewers confirm it, then ready", () => {
+    expect(issueStage({ status: "open", confirmed: false })).toBe("confirming");
+    expect(issueStage({ status: "open", confirmed: true })).toBe("ready");
   });
 
   it("leaves the work status alone once someone starts it", () => {
-    expect(issueStage({ status: "in_progress", voteCount: 4, confirmed: true })).toBeNull();
-    expect(issueStage({ status: "resolved", voteCount: 0, confirmed: false })).toBeNull();
+    expect(issueStage({ status: "in_progress", confirmed: true })).toBeNull();
+    expect(issueStage({ status: "resolved", confirmed: false })).toBeNull();
   });
 });
 
@@ -65,24 +56,14 @@ describe("confirmationCount", () => {
   });
 });
 
-describe("intake", () => {
-  it("keeps an open report an idea until it is confirmed and upvoted", () => {
-    expect(intakeKind({ status: "open", voteCount: 5, confirmed: false })).toBe("idea");
-    expect(intakeKind({ status: "open", voteCount: 2, confirmed: true })).toBe("idea");
-    expect(intakeKind({ status: "open", voteCount: 3, confirmed: true })).toBe("issue");
-  });
-
-  it("keeps a started or finished report an issue", () => {
-    expect(intakeKind({ status: "in_progress", voteCount: 4, confirmed: true })).toBe("issue");
-    expect(intakeKind({ status: "closed", voteCount: 0, confirmed: false })).toBe("idea");
-  });
-});
-
 describe("parseIssueStageView", () => {
-  it("keeps the idea filters and the issue filter", () => {
-    expect(parseIssueStageView("reported")).toBe("reported");
-    expect(parseIssueStageView("confirmed")).toBe("confirmed");
+  it("takes the issue stage names only: ideas are not issues and have no stage (#idea-table)", () => {
+    expect(parseIssueStageView("confirming")).toBe("confirming");
     expect(parseIssueStageView("ready")).toBe("ready");
+    expect(parseIssueStageView("idea")).toBeNull();
+    expect(parseIssueStageView("reported")).toBeNull();
+    expect(parseIssueStageView("confirmed")).toBeNull();
+    expect(parseIssueStageView("queued")).toBeNull();
     expect(parseIssueStageView(undefined)).toBeNull();
   });
 });
