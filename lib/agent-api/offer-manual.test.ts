@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 
 const db = vi.hoisted(() => ({
   $queryRaw: vi.fn(),
@@ -22,7 +22,7 @@ const agent = {
   name: "Ada's Claude",
   ownerId: "ada",
   tenantId: "tenant",
-  level: "contributor" as const,
+  level: "working" as const,
   burst: false,
   keyId: "key-ada",
 };
@@ -47,6 +47,7 @@ beforeEach(() => {
     status: "open",
     assigneeId: null,
     voteCount: 3,
+    convertedToIssueAt: new Date("2026-10-01T00:00:00Z"),
   });
   db.issueClaim.findFirst.mockResolvedValue(pendingOffer);
   isConfirmed.mockResolvedValue(true);
@@ -60,7 +61,8 @@ describe("manual issue offers (#590)", () => {
     expect(db.issueClaim.create).not.toHaveBeenCalled();
     expect(db.issueClaim.update).not.toHaveBeenCalled();
     expect(notifyClaimOffered).not.toHaveBeenCalled();
-  });  it("blocks with 409 waiting_for_human when human approval is required before offer (#598)", async () => {
+  });
+  it("blocks with 409 waiting_for_human when human approval is required before offer (#598)", async () => {
     (db as Record<string, unknown>).approvalRule = {
       findMany: vi.fn(async () => [
         { id: "rule-1", stage: "before_offer", issueTypeId: null, severity: null, fileGlob: null },

@@ -2,13 +2,12 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import type { AgentContext } from "@/lib/agents/require-agent";
 import { requireLevel } from "@/lib/agents/levels";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 import { isConfirmed } from "@/lib/agent-api/validation";
 import { publish } from "@/lib/agent-api/events";
 import { offerNext, scheduleOfferExpiry, sweepExpiredOffers } from "@/lib/agent-api/offer";
 import { awardBid } from "@/lib/agent-api/bid";
 import { notifyClaimOffered } from "@/lib/agent-notifications";
-import { WORK_READINESS_VOTE_THRESHOLD } from "@/lib/ticket-assignment";
 import { workflowFor } from "@/lib/workflow";
 
 const id = z.string().trim().min(1).max(191);
@@ -43,6 +42,8 @@ export type ReadyIssue = {
   createdAt: Date;
 };
 
+export const MAX_READY_ISSUES_LIMIT = 500;
+
 /**
  * Scan for ready issues in a project.
  */
@@ -52,21 +53,24 @@ export async function findReadyIssues(
   limit = 50,
   options?: { hasBids?: boolean; bidCreatedBefore?: Date }
 ): Promise<ReadyIssue[]> {
-  requireLevel(agent, "dispatcher");
+  requireLevel(agent, "manager");
+
+  const safeLimit = Number.isFinite(limit) && limit > 0
+    ? Math.min(Math.floor(limit), MAX_READY_ISSUES_LIMIT)
+    : 50;
 
   const workflow = await workflowFor(projectId);
   const offerCutoff = new Date(Date.now() - workflow.offerWindowSeconds * 1000);
 
   const ready: ReadyIssue[] = [];
   let cursor: string | undefined;
-  while (ready.length < limit) {
+  while (ready.length < safeLimit) {
     const issues = await prisma.bug.findMany({
       where: {
         tenantId: agent.tenantId,
         projectId,
         isDeleted: false,
         status: "open",
-        voteCount: { gte: WORK_READINESS_VOTE_THRESHOLD },
         claims: {
           none: {
             releasedAt: null,
@@ -106,7 +110,7 @@ export async function findReadyIssues(
     });
 
     // Filter to only confirmed issues
-    for (let offset = 0; offset < issues.length && ready.length < limit; offset += 10) {
+    for (let offset = 0; offset < issues.length && ready.length < safeLimit; offset += 10) {
       const confirmed = await Promise.all(
         issues.slice(offset, offset + 10).map(async (issue) => ({
           ...issue,
@@ -119,7 +123,7 @@ export async function findReadyIssues(
     cursor = issues[issues.length - 1].id;
   }
 
-  return ready.slice(0, limit);
+  return ready.slice(0, safeLimit);
 }
 
 /**
@@ -140,7 +144,7 @@ export async function dispatchReadyIssues(
   projectId: string,
   config: DispatcherConfig = {}
 ): Promise<DispatcherResult> {
-  requireLevel(agent, "dispatcher");
+  requireLevel(agent, "manager");
 
   const {
     policy = "offer_only",
@@ -336,13 +340,13 @@ export async function getDispatcherMetrics(
   pendingOffers: number;
   openBids: number;
 }> {
-  requireLevel(agent, "dispatcher");
+  requireLevel(agent, "manager");
 
   const workflow = await workflowFor(projectId);
   const offerCutoff = new Date(Date.now() - workflow.offerWindowSeconds * 1000);
 
   const [readyCount, activeClaims, pendingOffers, openBids] = await Promise.all([
-    findReadyIssues(agent, projectId, Number.POSITIVE_INFINITY).then((issues) => issues.length),
+    findReadyIssues(agent, projectId, 100).then((issues) => issues.length),
     prisma.issueClaim.count({
       where: {
         bug: { tenantId: agent.tenantId, projectId },

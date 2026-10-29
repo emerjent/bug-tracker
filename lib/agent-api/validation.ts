@@ -13,11 +13,6 @@ import {
 import { getPlatformRewardConfig, getProjectRewardConfig } from "@/lib/points/platform-rewards";
 import { severities } from "@/lib/validations/issue";
 import { publish } from "@/lib/agent-api/events";
-import { promoteEarnedReviewer } from "@/lib/agents/promotion";
-import { offerNext, scheduleOfferExpiry } from "@/lib/agent-api/offer";
-import { notifyClaimOffered } from "@/lib/agent-notifications";
-import { WORK_READINESS_VOTE_THRESHOLD } from "@/lib/ticket-assignment";
-import { hasBlockingRedesign } from "@/lib/redesigns";
 import { workflowFor } from "@/lib/workflow";
 import { parseIssueRef } from "@/lib/issue-ref";
 
@@ -235,10 +230,9 @@ async function countedConfirmations(db: Db, bug: LoadedBug): Promise<number> {
 }
 
 /**
- * The third check in confirmation: a triager agent has looked for duplicates
- * and found none — a `duplicate`-kind validation with verdict `reject`.
- * Only a `triager`-level agent's clearance counts; a reviewer clearing is not
- * the duplicate pass. The same independence rules apply as for reviewers.
+ * The third check in confirmation: an agent has looked for duplicates and
+ * found none — a `duplicate`-kind validation with verdict `reject`. Any agent
+ * class may clear; the same independence rules apply as for reviewers.
  */
 async function isTriageCleared(db: Db, bug: LoadedBug): Promise<boolean> {
   const dbDelegates = db as unknown as OptionalDbDelegates;
@@ -267,7 +261,7 @@ async function isTriageCleared(db: Db, bug: LoadedBug): Promise<boolean> {
     agent: { id: string; ownerUserId: string; level: string };
   }>) {
     if (agent.id === bug.createdByAgentId) continue;
-    if (!hasLevel(agent.level as AgentContext["level"], "triager")) continue;
+    if (!hasLevel(agent.level as AgentContext["level"], "working")) continue;
     if (reviewerConflict({ id: agent.id, ownerUserId: agent.ownerUserId }, reviewed)) continue;
     if (reviewerCreditConflict(onBehalfOfUserId, reviewed)) continue;
     if (undone.has(id)) continue;
@@ -367,7 +361,7 @@ export async function standingValidationAwards(db: Db, bugId: string): Promise<P
   });
 
   // Each independent person earns once per verdict, as the submit-time award
-  // keys do: a reject clears (triager permission required), an accept marks.
+  // keys do: a reject clears, an accept marks.
   const seen = new Set<string>();
   for (const v of verdicts as Array<{
     id: string;
@@ -384,7 +378,7 @@ export async function standingValidationAwards(db: Db, bugId: string): Promise<P
     const key = `${v.verdict}:${v.onBehalfOfUserId}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (v.verdict === "reject" && hasLevel(v.agent.level as AgentContext["level"], "triager")) {
+    if (v.verdict === "reject" && hasLevel(v.agent.level as AgentContext["level"], "working")) {
       entries.push({
         tenantId: bug.tenantId,
         userId: v.onBehalfOfUserId,
@@ -451,19 +445,8 @@ export async function submitValidation(
   }
   const body = parsed.data;
 
-  // Triage is its own level: `duplicate` verdicts open at triager; the other
-  // kinds still need a reviewer (#433).
-  const required = body.kind === "duplicate" ? "triager" : "reviewer";
-  if (!hasLevel(agent.level, required)) {
-    return {
-      status: 403,
-      error: "insufficient_level",
-      message:
-        required === "triager"
-          ? "Only triager, dispatcher or merger agents can submit duplicate verdicts."
-          : "Only reviewer, dispatcher or merger agents can validate issues.",
-    };
-  }
+  // Every agent class may triage and validate; owner independence and the
+  // quorum below are what keep a verdict honest (#433, #442).
 
   const ref = parseIssueRef(bugId);
   const bug = await prisma.bug.findFirst({
@@ -562,7 +545,6 @@ export async function submitValidation(
       if (!currentBug || currentBug.isDeleted) {
         return {
           submission: { status: 404 as const, error: "not_found" as const, message: "No such issue in this agent's tenant." },
-          automaticOffer: null,
         };
       }
       if (
@@ -571,7 +553,6 @@ export async function submitValidation(
       ) {
         return {
           submission: { status: 403 as const, error: "not_independent" as const, message: "The reviewer and credited person must be independent when the validation is recorded." },
-          automaticOffer: null,
         };
       }
       // Rate limiting is part of this transaction, so expected permission and
@@ -580,7 +561,6 @@ export async function submitValidation(
       if (beforeWrite && !(await beforeWrite(tx))) {
         return {
           submission: { status: 429 as const, error: "rate_limited" as const },
-          automaticOffer: null,
         };
       }
       const { confirmationsNeeded } = await workflowFor(bug.projectId, tx);
@@ -624,7 +604,7 @@ export async function submitValidation(
         // The duplicate pass pays its own role (#428): clear vs mark amounts
         // come from platform settings (hard-coded fallback).
         const sourceKey =
-          body.verdict === "reject" && hasLevel(agent.level, "triager")
+          body.verdict === "reject" && hasLevel(agent.level, "working")
             ? triagerClearSourceKey(bug.id, onBehalfOfUserId)
             : body.verdict === "accept"
               ? duplicateMarkerSourceKey(bug.id, onBehalfOfUserId)
@@ -687,10 +667,6 @@ export async function submitValidation(
         { bugId: bug.id, db: tx },
       );
 
-      // Re-evaluate the earned level after this validation is stored, inside
-      // the same transaction so the validation and promotion audit commit together.
-      await promoteEarnedReviewer(agent.agentId, tx);
-
       // Publish "issue.validated" event to the agent event feed (#445)
       await publish(tx, {
         tenantId: bug.tenantId,
@@ -724,40 +700,10 @@ export async function submitValidation(
         });
       }
 
-      let automaticOffer: Awaited<ReturnType<typeof offerNext>> = null;
-      if (newlyConfirmed) {
-        const issue = await tx.bug.findUnique({
-          where: { id: bug.id },
-          select: { id: true, projectId: true, title: true, status: true, assigneeId: true, areaId: true, voteCount: true },
-        });
-        const currentClaim = await tx.issueClaim.findFirst({
-          where: { bugId: bug.id, releasedAt: null, status: { in: ["offered", "active"] } },
-          select: { id: true },
-        });
-        if (
-          issue?.status === "open" &&
-          issue.voteCount >= WORK_READINESS_VOTE_THRESHOLD &&
-          !currentClaim &&
-          !(await hasBlockingRedesign(bug.id, tx))
-        ) {
-          automaticOffer = await offerNext(tx, { tenantId: bug.tenantId }, issue);
-        }
-      }
-
-      return {
-        submission: { status: 201 as const, validation, confirmed, newlyConfirmed },
-        automaticOffer,
-      };
+      // #idea-verdicts: a confirmed issue is not offered automatically. It
+      // waits for bids, an offer request or a manager agent's dispatch.
+      return { submission: { status: 201 as const, validation, confirmed, newlyConfirmed } };
     });
-    if (outcome.automaticOffer) {
-      notifyClaimOffered({
-        id: outcome.automaticOffer.claim.id,
-        bugId: bug.id,
-        bugTitle: outcome.automaticOffer.bugTitle,
-        beneficiaryUserId: outcome.automaticOffer.beneficiaryUserId,
-      });
-      scheduleOfferExpiry(outcome.automaticOffer.claim.id);
-    }
     return outcome.submission;
   } catch (error) {
     if (!isUniqueViolation(error)) throw error;

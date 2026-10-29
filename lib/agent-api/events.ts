@@ -58,12 +58,14 @@ export const AGENT_EVENT_TYPES = [
   "goal.created",
   "goal.split",
   "goal.updated",
+  "idea.created",
+  "idea.verdict",
   "issue.accepted",
   "issue.bid",
   "issue.bid_awarded",
   "issue.bid_withdrawn",
   "issue.confirmed",
-  "issue.created",
+  "issue.converted",
   "issue.deleted",
   "issue.interest",
   "issue.pr_linked",
@@ -136,6 +138,10 @@ export async function broadcastWhenCommitted(
         select: { id: true, projectId: true },
       });
     } catch (error) {
+      // A TypeError means the lookup can't be made at all (a client without
+      // the model, as in a unit test's partial Prisma mock). Waiting won't
+      // fix it, so give up now instead of retrying for a second.
+      if (error instanceof TypeError) return false;
       // The row cannot be read, so its visibility is unknown. Treat it as
       // not visible yet and try again; broadcasting here would send an event
       // whose row may never exist.
@@ -173,6 +179,8 @@ export async function publish(
     payload: EventPayload;
     actorAgentId?: string | null;
     bugId?: string | null;
+    /** An event with no issue (an idea's) names its project here; an issue's comes from the trigger. */
+    projectId?: string | null;
   },
 ): Promise<{ id: string }> {
   const event = await db.agentEvent.create({
@@ -182,6 +190,7 @@ export async function publish(
       payload: params.payload,
       actorAgentId: params.actorAgentId ?? null,
       bugId: params.bugId ?? null,
+      ...(params.projectId ? { projectId: params.projectId } : {}),
     },
     select: { id: true },
   });
@@ -205,6 +214,7 @@ export async function publish(
     payload: params.payload as unknown,
     actorAgentId: params.actorAgentId ?? null,
     bugId: params.bugId ?? null,
+    projectId: params.projectId ?? null,
     tenantId: params.tenantId,
     createdAt: new Date(),
   }).catch(() => {

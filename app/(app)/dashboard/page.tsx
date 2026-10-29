@@ -27,7 +27,8 @@ import {
 } from "@/lib/points/history";
 import { formatPoints, TARGET_POINTS } from "@/lib/points/rules";
 import { prisma } from "@/lib/prisma";
-import { openIssueStages } from "@/lib/issue-stage";
+import { openIssueStages, type IssueStage } from "@/lib/issue-stage";
+import { voteDirection } from "@/lib/voting";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -119,7 +120,7 @@ async function loadAssignedIssues(
   });
   if (bugs.length === 0) return [];
 
-  let stages = new Map<string, "reported" | "confirmed" | "ready">();
+  let stages = new Map<string, IssueStage>();
   try {
     stages = await openIssueStages(prisma, {
       id: { in: bugs.map((b) => b.id) },
@@ -136,7 +137,7 @@ async function loadAssignedIssues(
     severity: bug.severity,
     status: bug.status,
     voteCount: bug.voteCount,
-    userVoted: (bug.votes[0]?.value ?? 0) === 1,
+    userVoted: voteDirection(bug.votes[0]?.value) === 1,
     typeName: bug.type?.name ?? null,
     commentCount: bug._count.comments,
     createdAt: bug.createdAt.toISOString(),

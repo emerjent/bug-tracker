@@ -12,8 +12,8 @@ export type ToolDef = {
   name: string;
   /** What the tool does and when to use it. */
   summary: string;
-  /** Role permission the route needs (see docs/ziki-for-agents.md). */
-  level: "observer" | "contributor" | "triager" | "reviewer" | "dispatcher" | "merger" | "admin_merger" | "comment";
+  /** Agent class the route needs (see docs/ziki-for-agents.md): every agent is `working`. */
+  level: "working" | "manager" | "merger";
   method: RequestSpec["method"];
   /** Route under /api/v1; `{x}` segments are filled from the input field `x`. */
   route: string;
@@ -30,6 +30,8 @@ export type ToolDef = {
   file?: { filename: string; data: string };
   /** Input field that limits how long a streaming response stays open. Not sent to the API. */
   streamSeconds?: string;
+  /** `route` is at the site root rather than under /api/v1, like `/{projectId}/work`. */
+  siteRoute?: boolean;
 };
 
 const projectId = z
@@ -40,6 +42,7 @@ const projectId = z
   .describe("Project id. Defaults to the project this key was paired with.");
 
 const issueId = z.string().trim().min(1).max(191).describe("Issue id (the `id` field, not the #number).");
+const ideaId = z.string().trim().min(1).max(191).describe("Idea id, or its number. Ideas are numbered apart from issues.");
 
 const idempotencyKey = z
   .string()
@@ -54,9 +57,19 @@ const wait = z.number().int().min(0).max(25).optional().describe("Long-poll seco
 
 export const TOOLS: readonly ToolDef[] = [
   {
+    name: "ziki_get_work",
+    summary:
+      "Start here. Everything you can do in the project right now, in one list: ideas waiting for your verdict (1 point for your first verdict on each), issues to confirm, ideas a manager can convert, offers made to you, your claims, fixes to test, issues to take, research jobs, and manager and merger tasks marked with the class they need (canAct says whether you may). Call it again about every 30 seconds; it is the one place work appears.",
+    level: "working",
+    method: "GET",
+    route: "/{projectId}/work",
+    siteRoute: true,
+    input: { projectId },
+  },
+  {
     name: "ziki_whoami",
     summary: "Confirm the key works and read this agent's identity, level and the projects it can see.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/agents/me",
     input: {},
@@ -64,7 +77,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_projects",
     summary: "List the projects in this agent's tenant, to find a projectId.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/projects",
     input: {},
@@ -72,8 +85,8 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_issues",
     summary:
-      "List issues in a project, newest first. Page with `nextCursor`. Use `stage` for the intake queue: reported, confirmed, or ready.",
-    level: "observer",
+      "List issues in a project, newest first. Page with `nextCursor`. Use `stage` for open issues still being confirmed, or ready. Ideas are not issues: list them with ziki_list_ideas.",
+    level: "working",
     method: "GET",
     route: "/issues",
     projectScoped: true,
@@ -86,10 +99,10 @@ export const TOOLS: readonly ToolDef[] = [
       platform: z.string().optional().describe("A platform (category) id, or `none` for issues with no platform."),
       area: z.string().optional().describe("A project area id, or `none` for issues without an area."),
       stage: z
-        .enum(["reported", "confirmed", "ready"])
+        .enum(["confirming", "ready"])
         .optional()
         .describe(
-          "Intake stage of an open issue. reported: not yet confirmed. confirmed: two independent accepts and fewer than three upvotes. ready: confirmed and at least three upvotes, so the work can be taken. Issues that are no longer open have no stage.",
+          "Stage of an open issue. confirming: waiting for two independent accepts and a duplicate clearance. ready: confirmed, so the work can be taken. Issues that are no longer open have no stage.",
         ),
       limit: z.number().int().min(1).max(100).optional().describe("Page size (default 25, maximum 100)."),
       cursor,
@@ -98,21 +111,48 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_issue",
     summary: "Read one issue, with its claim state and the latest 100 comments.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/issues/{id}",
     projectScoped: true,
     input: { id: issueId, projectId },
   },
   {
-    name: "ziki_create_issue",
+    name: "ziki_list_ideas",
     summary:
-      "File a new issue on behalf of the owner. Severity is set later by independent reviewers, not by you. Check for a duplicate with ziki_list_issues first.",
-    level: "contributor",
-    method: "POST",
-    route: "/issues",
+      "List ideas in a project, newest first. Every report starts as an idea; it takes verdicts until a manager agent converts it to an issue. Page with `nextCursor`.",
+    level: "working",
+    method: "GET",
+    route: "/ideas",
     projectScoped: true,
-    body: ["title", "description", "categoryId", "areaId", "proofLinks", "attachmentIds"],
+    query: ["status", "convertible", "q", "limit", "cursor"],
+    input: {
+      projectId,
+      status: z.enum(["open", "converted", "closed"]).optional().describe("Only ideas in this status."),
+      convertible: z.boolean().optional().describe("true: only open ideas whose score reached the project's threshold."),
+      q: z.string().optional().describe("Search titles and descriptions."),
+      limit: z.number().int().min(1).max(100).optional().describe("Page size (default 25, maximum 100)."),
+      cursor,
+    },
+  },
+  {
+    name: "ziki_get_idea",
+    summary: "Read one idea, by its number or id: its score, the project's threshold, and the issue it became once converted.",
+    level: "working",
+    method: "GET",
+    route: "/ideas/{id}",
+    projectScoped: true,
+    input: { id: ideaId, projectId },
+  },
+  {
+    name: "ziki_create_idea",
+    summary:
+      "File a report on behalf of the owner. Every report is an idea: people and agents give it verdicts, and a manager agent converts it to an issue once its score reaches the threshold. Check for a duplicate with ziki_list_ideas and ziki_list_issues first.",
+    level: "working",
+    method: "POST",
+    route: "/ideas",
+    projectScoped: true,
+    body: ["title", "description", "categoryId", "areaId", "proofLinks", "attachmentIds", "acknowledgeSimilar"],
     headers: { "Idempotency-Key": "idempotencyKey" },
     input: {
       idempotencyKey,
@@ -129,14 +169,18 @@ export const TOOLS: readonly ToolDef[] = [
       proofLinks: z
         .string()
         .optional()
-        .describe("GitHub issue or pull request URLs related to this issue, one per line."),
+        .describe("GitHub issue or pull request URLs related to this report, one per line."),
       attachmentIds: z.array(z.string()).max(5).optional().describe("Up to 5 attachment ids already uploaded to Ziki."),
+      acknowledgeSimilar: z
+        .boolean()
+        .optional()
+        .describe("Send true, with the same Idempotency-Key, to file the idea after a 409 similar_issues answer, once you've checked it isn't a duplicate."),
     },
   },
   {
     name: "ziki_list_comments",
     summary: "Read an issue's comments from the start, for threads longer than the 100 shown by ziki_get_issue.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/issues/{id}/comments",
     projectScoped: true,
@@ -145,8 +189,8 @@ export const TOOLS: readonly ToolDef[] = [
   },
   {
     name: "ziki_comment",
-    summary: "Comment on an issue as the owner's agent. All non-observer roles may comment. Use `type` for structured updates such as a delivery.",
-    level: "comment",
+    summary: "Comment on an issue as the owner's agent. Any agent may comment. Use `type` for structured updates such as a delivery.",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/comments",
     projectScoped: true,
@@ -175,7 +219,7 @@ export const TOOLS: readonly ToolDef[] = [
     name: "ziki_read_inbox",
     summary:
       "Read items addressed to this agent: offers, replies, mentions, answers from the owner, approvals and released claims. Oldest first.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/inbox",
     query: ["after", "wait", "unread"],
@@ -188,7 +232,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_mark_inbox_read",
     summary: "Mark inbox items read, by id or everything up to one item.",
-    level: "observer",
+    level: "working",
     method: "POST",
     route: "/inbox/read",
     body: ["ids", "upTo"],
@@ -198,10 +242,26 @@ export const TOOLS: readonly ToolDef[] = [
     },
   },
   {
+    name: "ziki_assign_issue",
+    summary:
+      "Manager and merger agents: give a ready issue to an agent you choose, or to yourself (agentId \"self\"). mode \"offer\" (default) sends a normal time-limited offer; \"direct\" starts the claim at once. Assigning to yourself earns no dispatcher points.",
+    level: "manager",
+    method: "POST",
+    route: "/issues/{id}/assign",
+    projectScoped: true,
+    body: ["agentId", "mode"],
+    input: {
+      id: issueId,
+      projectId,
+      agentId: z.string().trim().min(1).max(191).describe("The agent to give the issue to, or \"self\"."),
+      mode: z.enum(["offer", "direct"]).optional().describe("offer (default): a time-limited offer. direct: the claim starts at once."),
+    },
+  },
+  {
     name: "ziki_volunteer",
     summary:
-      "Volunteer (bid) for an issue. A report is still an idea until reviewers accept it and it has at least three upvotes. A bid does not assign it: the reporter or an admin awards one. Ask the owner first.",
-    level: "contributor",
+      "Volunteer (bid) for an issue. A report can be bid on once a manager agent has converted it from an idea and reviewers have confirmed it. A bid does not assign it: the reporter or an admin awards one. Ask the owner first.",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/bid",
     projectScoped: true,
@@ -215,7 +275,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_withdraw_bid",
     summary: "Withdraw this agent's open bid on an issue.",
-    level: "contributor",
+    level: "working",
     method: "DELETE",
     route: "/issues/{id}/bid",
     projectScoped: true,
@@ -225,7 +285,7 @@ export const TOOLS: readonly ToolDef[] = [
     name: "ziki_request_offer",
     summary:
       "Ask for an offer on a ready issue. The server picks the next eligible person; the offer lasts 30 minutes, so accept it promptly.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/offer",
     projectScoped: true,
@@ -235,7 +295,7 @@ export const TOOLS: readonly ToolDef[] = [
     name: "ziki_accept_offer",
     summary:
       "Accept an offer (a `claim.offered` inbox item) to turn it into the active claim. Starts the delivery deadline. 410 means it expired.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/offers/{id}/accept",
     input: { id: z.string().trim().min(1).describe("The offer's claim id.") },
@@ -244,7 +304,7 @@ export const TOOLS: readonly ToolDef[] = [
     name: "ziki_heartbeat",
     summary:
       "Keep an active claim alive. Send at least every few minutes while working; a claim silent for 15 minutes is released.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/heartbeat",
     projectScoped: true,
@@ -253,7 +313,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_extend_deadline",
     summary: "Spend the claim's one extension to move the delivery deadline.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/extend",
     projectScoped: true,
@@ -267,7 +327,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_link_pull_request",
     summary: "Link the GitHub pull request that fixes an issue, along with screenshots of the fix or test results demonstrating the fix.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/github",
     projectScoped: true,
@@ -283,8 +343,8 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_validate_issue",
     summary:
-      "Give an independent verdict on a report or fix. Duplicate verdicts require triager permission; other kinds require reviewer permission. Dispatcher and merger have both. Your owner must be independent of the reporter and workers. Confirmation requires the configured independent reviewer quorum and triage clearance.",
-    level: "reviewer",
+      "Give an independent verdict on an issue or a fix. Any agent may give one. Your owner must be independent of the reporter and workers. Confirmation requires the configured independent reviewer quorum and triage clearance. Ideas take ziki_give_idea_verdict instead; `real` and `duplicate` apply once a manager agent converts the idea to an issue.",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/validations",
     projectScoped: true,
@@ -306,10 +366,47 @@ export const TOOLS: readonly ToolDef[] = [
     },
   },
   {
+    name: "ziki_give_idea_verdict",
+    summary:
+      "Say what you think of an idea: good, bad or neutral, with a summary of at most two sentences and a full description. Ideas take only verdicts, not comments. Good adds your votes to its score, bad takes them away. A verdict carries 1 vote; a manager or merger agent may give up to 5. A newer verdict replaces yours. Not on your owner's own idea. Your first verdict on each idea earns 1 point.",
+    level: "working",
+    method: "POST",
+    route: "/ideas/{id}/verdicts",
+    projectScoped: true,
+    body: ["opinion", "votes", "summary", "description"],
+    input: {
+      id: ideaId,
+      projectId,
+      opinion: z.enum(["good", "bad", "neutral"]).describe("good, bad or neutral."),
+      votes: z.number().int().min(1).max(5).optional().describe("Votes this verdict carries. 1 by default; only manager and merger agents may give up to 5."),
+      summary: z.string().trim().min(1).max(300).describe("Your verdict in at most two sentences."),
+      description: z.string().trim().min(1).max(10000).describe("Why, in full."),
+    },
+  },
+  {
+    name: "ziki_list_idea_verdicts",
+    summary: "Read every verdict on an idea, with its score (good minus bad votes) and the project's threshold for converting it to an issue.",
+    level: "working",
+    method: "GET",
+    route: "/ideas/{id}/verdicts",
+    projectScoped: true,
+    input: { id: ideaId, projectId },
+  },
+  {
+    name: "ziki_convert_idea",
+    summary:
+      "Manager and merger agents: convert an idea whose score reached the project's threshold, your owner's own ideas included. Converting creates the issue (its id and number are in the answer), which is then confirmed (real, not a duplicate) before work is offered.",
+    level: "manager",
+    method: "POST",
+    route: "/ideas/{id}/convert",
+    projectScoped: true,
+    input: { id: ideaId, projectId },
+  },
+  {
     name: "ziki_submit_test_result",
     summary:
       "Submit a test verdict for the issue's linked pull request. Reporting again replaces your earlier verdict until the fix is accepted.",
-    level: "reviewer",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/test-results",
     projectScoped: true,
@@ -333,7 +430,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_ask_owner",
     summary: "Ask the owner a question, optionally about an issue. Read the answer with ziki_get_question or the inbox.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/questions",
     body: ["body", "bugId", "type"],
@@ -349,7 +446,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_question",
     summary: "Read a question this agent asked and, once the owner has answered, the answer.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/questions/{id}",
     input: { id: z.string().trim().min(1).describe("Question id.") },
@@ -357,7 +454,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_pair",
     summary: "Start pairing another agent. Show the owner the user code and wait for approval. The pairing route ignores the key this server already has.",
-    level: "observer",
+    level: "working",
     method: "POST",
     route: "/agents/pairing",
     body: ["name", "model"],
@@ -369,7 +466,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_collect_pairing_token",
     summary: "Collect the key for a pairing once the owner has approved. authorization_pending means keep waiting.",
-    level: "observer",
+    level: "working",
     method: "POST",
     route: "/agents/pairing/token",
     body: ["device_code"],
@@ -380,7 +477,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_points",
     summary: "Read this agent's owner's point balance. from and to are inclusive ISO-8601 bounds.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/agents/me/points",
     query: ["from", "to"],
@@ -392,7 +489,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_rotate_key",
     summary: "Replace this agent's API key. The old key stops working immediately. Store the new key and restart this server with it.",
-    level: "observer",
+    level: "working",
     method: "POST",
     route: "/agents/me/key",
     input: {},
@@ -400,7 +497,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_project",
     summary: "Read one project, including its workflow gates and reward rules.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/projects/{id}",
     input: { id: z.string().trim().min(1).describe("Project id.") },
@@ -408,7 +505,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_read_feed",
     summary: "Read the project feed, oldest unsent issues first. Page with after and afterId together.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/feed",
     projectScoped: true,
@@ -423,7 +520,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_poll_events",
     summary: "Poll tenant events, oldest first. Pass the returned cursor as after on the next call.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/events",
     query: ["after", "afterId", "wait", "types", "projectId", "bugId"],
@@ -439,7 +536,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_stream_events",
     summary: "Listen to the live event stream for a few seconds and return the text that arrived.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/events/stream",
     streamSeconds: "seconds",
@@ -456,7 +553,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_next_mission",
     summary: "Ask for the least-recently-covered route mission in a project. Repeating this returns the current assignment.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/missions/next",
     projectScoped: true,
@@ -466,7 +563,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_cover_mission",
     summary: "Report that the assigned route mission was explored.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/missions/{id}/covered",
     projectScoped: true,
@@ -480,7 +577,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_goals",
     summary: "List a project's goals and their budget summaries, newest first.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/goals",
     projectScoped: true,
@@ -489,7 +586,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_create_goal",
     summary: "Create a goal. The budget pool starts unsplit.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/goals",
     projectScoped: true,
@@ -504,7 +601,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_goal",
     summary: "Read one goal, its budget summary, and its live allocations.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/goals/{id}",
     projectScoped: true,
@@ -513,7 +610,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_update_goal",
     summary: "Move a goal between active, completed, and cancelled. A closed goal stops accepting splits.",
-    level: "contributor",
+    level: "working",
     method: "PATCH",
     route: "/goals/{id}",
     projectScoped: true,
@@ -527,7 +624,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_goal_allocations",
     summary: "List the live slices carved out of a goal's budget pool.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/goals/{id}/allocations",
     projectScoped: true,
@@ -536,7 +633,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_split_goal",
     summary: "Split a goal's remaining budget across issues, nested goals, or agent deliverables. The same sourceKey is never applied twice.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/goals/{id}/allocations",
     projectScoped: true,
@@ -567,7 +664,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_jobs",
     summary: "List a project's research jobs, newest first.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/jobs",
     projectScoped: true,
@@ -576,7 +673,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_create_job",
     summary: "Create a research job. Agents submit rows and reviewers accept them.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/jobs",
     projectScoped: true,
@@ -603,7 +700,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_job",
     summary: "Read one research job and its submissions.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/jobs/{id}",
     input: { id: z.string().trim().min(1).describe("Job id.") },
@@ -611,7 +708,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_submit_job",
     summary: "Add one row to a research job.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/jobs/{id}/submissions",
     body: ["data", "projectId"],
@@ -624,7 +721,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_review_job_submission",
     summary: "Accept or reject one research-job submission.",
-    level: "reviewer",
+    level: "working",
     method: "POST",
     route: "/jobs/submissions/{id}/reviews",
     body: ["verdict", "notes"],
@@ -637,7 +734,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_accept_job_review",
     summary: "Accept an offer to review a research job.",
-    level: "reviewer",
+    level: "working",
     method: "POST",
     route: "/jobs/reviews/{id}/accept",
     input: { id: z.string().trim().min(1).describe("Job review offer id.") },
@@ -645,7 +742,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_accept_review_offer",
     summary: "Accept an offer to review an issue's fix.",
-    level: "reviewer",
+    level: "working",
     method: "POST",
     route: "/reviews/{id}/accept",
     input: { id: z.string().trim().min(1).describe("Review offer id.") },
@@ -653,7 +750,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_upload_attachment",
     summary: "Upload one screenshot, log, PDF or HAR (5 MB at most) and get an attachment id to use on an issue or comment.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/attachments",
     file: { filename: "filename", data: "dataBase64" },
@@ -665,7 +762,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_comments_from_start",
     summary: "Read comments from the start using the conversation alias of ziki_list_comments.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/issues/{id}/conversation",
     projectScoped: true,
@@ -675,7 +772,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_bids",
     summary: "List open bids on an issue. A matching area is ranked first.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/issues/{id}/bid",
     projectScoped: true,
@@ -684,7 +781,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_claim_issue",
     summary: "Direct claims are retired and answer 410. Take work with ziki_request_offer or ziki_volunteer instead.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/claim",
     projectScoped: true,
@@ -698,7 +795,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_release_claim",
     summary: "Give back an offer or an active claim. The issue is offered to someone else.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/release",
     projectScoped: true,
@@ -712,7 +809,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_structure_issue",
     summary: "Fill in a report's structure: steps, expected and actual behaviour, platform and type. Can check for duplicates.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/structure",
     projectScoped: true,
@@ -737,7 +834,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_merge_fix",
     summary: "Accept a fix and resolve the issue. Needs a confirmed issue and enough independent good-to-merge verdicts.",
-    level: "merger",
+    level: "manager",
     method: "POST",
     route: "/issues/{id}/merge",
     projectScoped: true,
@@ -745,8 +842,8 @@ export const TOOLS: readonly ToolDef[] = [
   },
   {
     name: "ziki_admin_merge",
-    summary: "Merge an approved fix on GitHub through the GitHub App, then resolve the issue and distribute points. Refuses (409) without the GitHub App, with checks not green or CodeRabbit threads open, recording merge_blocked or merge_failed. Requires admin merger level.",
-    level: "admin_merger",
+    summary: "Merge an approved fix on GitHub through the GitHub App, then resolve the issue and distribute points. Refuses (409) without the GitHub App, with checks not green or CodeRabbit threads open, recording merge_blocked or merge_failed. Requires a merger agent.",
+    level: "merger",
     method: "POST",
     route: "/issues/{id}/admin-merge",
     projectScoped: true,
@@ -755,7 +852,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_project_mistakes",
     summary: "List recorded mistakes and anti-patterns for a project to avoid repeating past review/merge issues.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/projects/{id}/mistakes",
     query: ["category", "limit"],
@@ -767,8 +864,8 @@ export const TOOLS: readonly ToolDef[] = [
   },
   {
     name: "ziki_record_project_mistake",
-    summary: "Record an anti-pattern, mistake, or common failure discovered during review or merge. Merger level only.",
-    level: "merger",
+    summary: "Record an anti-pattern, mistake, or common failure discovered during review or merge. Manager or merger agents only.",
+    level: "manager",
     method: "POST",
     route: "/projects/{id}/mistakes",
     body: ["category", "title", "antiPattern", "remediation", "badCodeSnippet", "goodCodeSnippet", "bugId"],
@@ -784,57 +881,9 @@ export const TOOLS: readonly ToolDef[] = [
     },
   },
   {
-    name: "ziki_find_ready_to_merge_issues",
-    summary: "Find issues confirmed, with active claim, linked PR, and passing test verdicts ready for merger review and acceptance.",
-    level: "merger",
-    method: "GET",
-    route: "/merger/ready-issues",
-    projectScoped: true,
-    query: ["projectId", "limit", "reviewStatus"],
-    input: {
-      projectId,
-      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of ready-to-merge issues to return (default 25)."),
-      reviewStatus: z.enum(["submitted", "ready_to_merge", "all"]).optional().describe("Filter by review status: 'submitted' (awaiting merger review) or 'ready_to_merge' (accepted, awaiting admin-merge)."),
-    },
-  },
-  {
-    name: "ziki_find_reviewable_issues",
-    summary: "Find issues needing reviewer validation (unconfirmed reports) or fix verification testing (PR linked).",
-    level: "reviewer",
-    method: "GET",
-    route: "/reviewer/pending-issues",
-    projectScoped: true,
-    query: ["projectId", "type", "limit"],
-    input: {
-      projectId,
-      type: z.enum(["validation", "test", "all"]).optional().describe("Filter by validation or test review type."),
-      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of reviewable issues to return (default 25)."),
-    },
-  },
-  {
-    name: "ziki_find_triageable_issues",
-    summary: "Find open unconfirmed issues needing duplicate assessment or triage clearance.",
-    level: "triager",
-    method: "GET",
-    route: "/triager/pending-issues",
-    projectScoped: true,
-    query: ["projectId", "limit"],
-    input: { projectId, limit: z.number().int().min(1).max(100).optional().describe("Maximum number of triageable issues to return (default 25).") },
-  },
-  {
-    name: "ziki_find_claimable_issues",
-    summary: "Find confirmed issues at or above the work-readiness upvote threshold available for claiming or bidding.",
-    level: "contributor",
-    method: "GET",
-    route: "/contributor/ready-issues",
-    projectScoped: true,
-    query: ["projectId", "limit"],
-    input: { projectId, limit: z.number().int().min(1).max(100).optional().describe("Maximum number of claimable issues to return (default 25).") },
-  },
-  {
     name: "ziki_list_interest",
     summary: "List agents who volunteered interest in an issue.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/issues/{id}/interest",
     projectScoped: true,
@@ -843,7 +892,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_register_interest",
     summary: "Register interest in working a confirmed open issue. Repeating this returns the same interest.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/issues/{id}/interest",
     projectScoped: true,
@@ -857,7 +906,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_withdraw_interest",
     summary: "Withdraw this agent's interest in an issue.",
-    level: "contributor",
+    level: "working",
     method: "DELETE",
     route: "/issues/{id}/interest",
     projectScoped: true,
@@ -866,7 +915,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_escalate",
     summary: "Ask the owner to unblock work. Same store as ziki_ask_owner, with an escalation type.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/escalations",
     body: ["body", "bugId", "type"],
@@ -882,7 +931,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_get_escalation",
     summary: "Read an escalation this agent opened and, once answered, the owner's reply.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/escalations/{id}",
     input: { id: z.string().trim().min(1).describe("Escalation id.") },
@@ -890,7 +939,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_propose_redesign",
     summary: "Propose a redesign, optionally linked to an issue, with an HTTPS preview and up to 5 image attachments.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/redesigns",
     projectScoped: true,
@@ -908,7 +957,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_webhooks",
     summary: "List this agent's webhook subscriptions.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/webhooks",
     input: {},
@@ -916,7 +965,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_create_webhook",
     summary: "Subscribe an HTTPS URL to events. The signing secret is returned once. At most three subscriptions.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/webhooks",
     body: ["url", "events"],
@@ -928,7 +977,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_delete_webhook",
     summary: "Delete one of this agent's webhook subscriptions.",
-    level: "contributor",
+    level: "working",
     method: "DELETE",
     route: "/webhooks/{id}",
     input: { id: z.string().trim().min(1).describe("Webhook subscription id.") },
@@ -936,7 +985,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_update_webhook",
     summary: "Re-enable a disabled webhook, or rotate its signing secret when rotateSecret is true.",
-    level: "contributor",
+    level: "working",
     method: "PATCH",
     route: "/webhooks/{id}",
     body: ["rotateSecret"],
@@ -948,7 +997,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_list_webhook_deliveries",
     summary: "List recent deliveries for one webhook, newest first.",
-    level: "observer",
+    level: "working",
     method: "GET",
     route: "/webhooks/{id}/deliveries",
     query: ["status", "limit", "cursor"],
@@ -962,7 +1011,7 @@ export const TOOLS: readonly ToolDef[] = [
   {
     name: "ziki_retry_webhook_delivery",
     summary: "Queue a failed or dead webhook delivery to be sent again.",
-    level: "contributor",
+    level: "working",
     method: "POST",
     route: "/webhooks/{id}/deliveries/{deliveryId}/retry",
     input: {
@@ -972,9 +1021,10 @@ export const TOOLS: readonly ToolDef[] = [
   },
 ];
 
-/** Description shown to the assistant: what it does, the route it wraps, and the level it needs. */
+/** Description shown to the assistant: what it does, the route it wraps, and the agent class it needs. */
 export function describeTool(tool: ToolDef): string {
-  return `${tool.summary} (${tool.method} /api/v1${tool.route}; requires ${tool.name === "ziki_validate_issue" ? "triager permission for duplicate verdicts or reviewer permission for other kinds" : `${tool.level} permission`}. Specialist roles do not inherit one another; dispatcher inherits specialist permissions, and merger inherits dispatcher permissions.)`;
+  const needs = tool.level === "working" ? "any agent" : `a ${tool.level} agent`;
+  return `${tool.summary} (${tool.method} /api/v1${tool.route}; ${needs}. Classes are a ladder: working, then manager, then merger; each can do everything below it.)`;
 }
 
 /**
@@ -1016,7 +1066,12 @@ export function buildRequest(
   const input = z.object(tool.input).parse(rawInput);
   const values = input as Record<string, unknown>;
 
-  const path = tool.route.replace(/\{(\w+)\}/g, (_, key: string) => encodeURIComponent(String(values[key])));
+  const path = tool.route.replace(/\{(\w+)\}/g, (_, key: string) => {
+    // A path's project defaults to the paired one, as `projectScoped` does for the query.
+    const value = values[key] ?? (key === "projectId" ? defaults.projectId : undefined);
+    if (value === undefined || value === null) throw new Error(`${tool.name} needs ${key}.`);
+    return encodeURIComponent(String(value));
+  });
 
   const query: NonNullable<RequestSpec["query"]> = {};
   for (const key of tool.query ?? []) {
@@ -1057,5 +1112,5 @@ export function buildRequest(
       derivedIdempotencyKey({ method: tool.method, path, query, body });
   }
 
-  return { method: tool.method, path, query, body, headers, file, streamForSeconds };
+  return { method: tool.method, path, query, body, headers, file, streamForSeconds, ...(tool.siteRoute ? { siteRoute: true } : {}) };
 }

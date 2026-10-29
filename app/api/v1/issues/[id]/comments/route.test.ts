@@ -35,7 +35,7 @@ const key = {
     name: "Agent A",
     ownerUserId: "owner-a",
     tenantId: "tenant-a",
-    level: "contributor",
+    level: "working",
     burst: false,
     revokedAt: null,
     owner: { memberships: [{ tenantId: "tenant-a" }] },
@@ -71,6 +71,7 @@ beforeEach(() => {
     title: "Bug 1",
     reporterId: "owner-a",
     assigneeId: null,
+    convertedToIssueAt: new Date("2026-10-19T13:00:00Z"),
   });
   db.comment.create.mockResolvedValue({
     id: "c-1",

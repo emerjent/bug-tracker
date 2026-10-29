@@ -8,6 +8,7 @@ const db = vi.hoisted(() => ({
   project: { findFirst: vi.fn() }, category: { findMany: vi.fn(), findFirst: vi.fn() },
   projectArea: { findMany: vi.fn(), findFirst: vi.fn() },
   bug: { findMany: vi.fn(), findFirst: vi.fn(), findUnique: vi.fn(), create: vi.fn(), update: vi.fn() },
+  idea: { findFirst: vi.fn(), findUniqueOrThrow: vi.fn(), create: vi.fn() },
   comment: { findFirst: vi.fn(), findMany: vi.fn(), create: vi.fn() },
   membership: { findUnique: vi.fn() }, issueWatch: { upsert: vi.fn() }, bugActivity: { create: vi.fn() },
   idempotencyKey: { findUnique: vi.fn(), deleteMany: vi.fn(), create: vi.fn(), update: vi.fn() },
@@ -23,7 +24,8 @@ vi.mock("@/lib/notify", () => ({ notifyLater }));
 vi.mock("@/lib/agents/rate-budget", async (original) => ({
   ...await original<typeof import("@/lib/agents/rate-budget")>(), consumeAgentBudget: budget,
 }));
-import { GET as list, POST as create } from "@/app/api/v1/issues/route";
+import { GET as list, POST as createIssue } from "@/app/api/v1/issues/route";
+import { POST as create } from "@/app/api/v1/ideas/route";
 import { GET as read } from "@/app/api/v1/issues/[id]/route";
 import { POST as comment, GET as comments } from "@/app/api/v1/issues/[id]/comments/route";
 import { POST as claim } from "@/app/api/v1/issues/[id]/claim/route";
@@ -33,6 +35,8 @@ import { PROJECT_ID_REQUIRED } from "./issues";
 afterEach(() => vi.restoreAllMocks());
 
 const issue = { id: "issue-a", title: "A distinct issue", createdAt: new Date("2026-10-19T12:00:00Z"), comments: [] };
+// Every report is an idea (#idea-table): agents file ideas, and converting one makes the issue.
+const idea = { id: "idea-a", number: 1, title: "A distinct issue", description: "An adequate description of the issue.", status: "open", score: 0, projectId: "project-a", issue: null, attachments: [] };
 const context = { params: Promise.resolve({ id: issue.id }) };
 const validBody = { projectId: "project-a", title: issue.title, description: "An adequate description of the issue.", acknowledgeSimilar: true };
 
@@ -62,7 +66,7 @@ beforeEach(() => {
   db.agentEvent.create.mockResolvedValue({ id: "event-a" });
   db.webhookSubscription.findMany.mockResolvedValue([]);
   db.agentApiKey.findUnique.mockResolvedValue({ id: "key-a", revokedAt: null, agent: {
-    id: "agent-a", name: "Agent A", ownerUserId: "owner-a", tenantId: "tenant-a", level: "contributor", burst: false, revokedAt: null,
+    id: "agent-a", name: "Agent A", ownerUserId: "owner-a", tenantId: "tenant-a", level: "working", burst: false, revokedAt: null,
     owner: { memberships: [{ tenantId: "tenant-a" }] },
   } });
   budget.mockResolvedValue({ allowed: true });
@@ -78,6 +82,9 @@ beforeEach(() => {
   db.bug.findFirst.mockResolvedValue(issue);
   db.bug.findUnique.mockResolvedValue(null);
   db.bug.create.mockResolvedValue({ id: issue.id });
+  db.idea.create.mockResolvedValue({ id: idea.id, number: idea.number });
+  db.idea.findFirst.mockResolvedValue({ id: idea.id });
+  db.idea.findUniqueOrThrow.mockResolvedValue(idea);
   db.membership.findUnique.mockResolvedValue({ userId: "beneficiary-a" });
   db.idempotencyKey.findUnique.mockResolvedValue(null);
   db.idempotencyKey.create.mockResolvedValue({ id: "held-key" });
@@ -87,13 +94,14 @@ beforeEach(() => {
 });
 
 describe("agent issue API authentication", () => {
-  it.each(["triager", "reviewer"] as const)("lets a %s read and comment but not create or claim work", async (level) => {
+  it.each(["working", "manager", "merger"] as const)("lets a %s agent read, comment and file ideas; direct claims stay retired", async (level) => {
     const key = await db.agentApiKey.findUnique();
     db.agentApiKey.findUnique.mockResolvedValue({ ...key, agent: { ...key.agent, level } });
     expect((await list(request())).status).toBe(200);
     expect((await comment(request("POST", { body: "Role-scoped assessment" }), context)).status).toBe(201);
-    expect((await create(request("POST", validBody))).status).toBe(403);
-    expect((await claim(request("POST", {}), context)).status).toBe(403);
+    expect((await create(request("POST", validBody))).status).toBe(201);
+    expect((await claim(request("POST", {}), context)).status).toBe(410);
+    expect(db.idea.create).toHaveBeenCalledTimes(1);
     expect(db.bug.create).not.toHaveBeenCalled();
   });
   it("fails closed without a key on every route", async () => {
@@ -116,16 +124,16 @@ describe("agent issue API authentication", () => {
     expect((await list(request())).status).toBe(401);
   });
 
-  it("allows observer reads but denies both writes and audits the denials", async () => {
+  it("fails closed for an agent with an unknown class and audits the denials", async () => {
     const key = await db.agentApiKey.findUnique();
     db.agentApiKey.findUnique.mockResolvedValue({ ...key, agent: { ...key.agent, level: "observer" } });
-    expect((await list(request())).status).toBe(200);
-    expect((await read(request(), context)).status).toBe(200);
+    expect((await list(request())).status).toBe(403);
+    expect((await read(request(), context)).status).toBe(403);
     expect((await create(request("POST", validBody))).status).toBe(403);
     expect((await comment(request("POST", { body: "hello" }), context)).status).toBe(403);
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
     expect(db.comment.create).not.toHaveBeenCalled();
-    expect(db.agentAuditEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "issues.create", payload: { status: 403, request: true } }) }));
+    expect(db.agentAuditEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "ideas.create", payload: { status: 403, request: true } }) }));
   });
 
   it("uses the shared read/write budgets and preserves Retry-After", async () => {
@@ -136,6 +144,13 @@ describe("agent issue API authentication", () => {
     expect(response.status).toBe(429);
     expect(response.headers.get("retry-after")).toBe("12");
     expect(budget).toHaveBeenLastCalledWith({ id: "agent-a", burst: false, burstUntil: null }, "write");
+    expect(db.idea.create).not.toHaveBeenCalled();
+  });
+
+  it("files no issue directly: issues are made by converting an idea (#idea-table)", async () => {
+    const response = await createIssue();
+    expect(response.status).toBe(410);
+    expect(await response.json()).toMatchObject({ code: "use_ideas" });
     expect(db.bug.create).not.toHaveBeenCalled();
   });
 
@@ -207,6 +222,21 @@ describe("agent issue reads", () => {
     expect(db.bug.findMany).not.toHaveBeenCalled();
   });
 
+  it("rejects an unusable limit with 422 on issues and comments (#454)", async () => {
+    for (const raw of ["0", "-5", "abc", "1.5"]) {
+      const response = await list(request("GET", undefined, `?projectId=project-a&limit=${raw}`));
+      expect(response.status, raw).toBe(422);
+      await expect(response.json(), raw).resolves.toMatchObject({ error: expect.stringContaining("limit") });
+    }
+    for (const raw of ["0", "-5", "abc", "1.5"]) {
+      const response = await comments(request("GET", undefined, `?projectId=project-a&limit=${raw}`), context);
+      expect(response.status, raw).toBe(422);
+      await expect(response.json(), raw).resolves.toMatchObject({ error: expect.stringContaining("limit") });
+    }
+    expect(db.bug.findMany).not.toHaveBeenCalled();
+    expect(db.comment.findMany).not.toHaveBeenCalled();
+  });
+
   it("filters by a case-insensitive text search on title and description (#460)", async () => {
     const cursor = encodeCursor({ id: "previous", createdAt: issue.createdAt });
     await list(request("GET", undefined, `?projectId=project-a&q=%20Login%25&cursor=${cursor}`));
@@ -220,7 +250,7 @@ describe("agent issue reads", () => {
     expect(db.bug.findMany.mock.lastCall?.[0].where).not.toHaveProperty("AND");
   });
 
-  it("keeps only open issues in the requested intake stage, then pages them", async () => {
+  it("keeps only open issues in the requested stage, then pages them", async () => {
     const open = {
       id: "issue-a",
       status: "open",
@@ -232,26 +262,20 @@ describe("agent issue reads", () => {
       claims: [],
     };
     db.bug.findMany.mockResolvedValueOnce([open]).mockResolvedValueOnce([issue]);
-    const response = await list(request("GET", undefined, "?projectId=project-a&stage=reported&limit=1"));
+    const response = await list(request("GET", undefined, "?projectId=project-a&stage=confirming&limit=1"));
     expect(response.status).toBe(200);
     expect(db.bug.findMany).toHaveBeenLastCalledWith(expect.objectContaining({
       where: expect.objectContaining({ status: "open", id: { in: ["issue-a"] } }),
       take: 2,
     }));
-
-    db.bug.findMany.mockClear();
-    db.bug.findMany.mockResolvedValueOnce([{ ...open, voteCount: 1 }]);
-    const confirmed = await list(request("GET", undefined, "?projectId=project-a&stage=confirmed"));
-    expect(confirmed.status).toBe(200);
-    expect(await confirmed.json()).toEqual({ items: [], nextCursor: null });
-    expect(db.bug.findMany).toHaveBeenCalledTimes(1);
   });
 
-  it("treats a confirmed issue with three upvotes as ready", async () => {
+  it("treats a confirmed issue as ready, whatever its upvotes", async () => {
+    // Confirmed = two independent real accepts AND a not-a-duplicate clearance (#714).
     const open = {
       id: "issue-a",
       status: "open",
-      voteCount: 3,
+      voteCount: 0,
       beneficiaryUserId: "other",
       reporterId: "other",
       createdByAgentId: null,
@@ -262,6 +286,7 @@ describe("agent issue reads", () => {
     db.issueValidation.findMany.mockResolvedValueOnce([
       { id: "v1", bugId: "issue-a", createdAt: new Date("2026-10-20T00:00:00Z"), agentId: "r1", agent: { ownerUserId: "rev-1" } },
       { id: "v2", bugId: "issue-a", createdAt: new Date("2026-10-20T00:00:00Z"), agentId: "r2", agent: { ownerUserId: "rev-2" } },
+      { id: "v3", bugId: "issue-a", kind: "duplicate", createdAt: new Date("2026-10-20T00:00:00Z"), agentId: "r3", agent: { ownerUserId: "rev-3" } },
     ]);
     const response = await list(request("GET", undefined, "?projectId=project-a&stage=ready"));
     expect(response.status).toBe(200);
@@ -271,7 +296,7 @@ describe("agent issue reads", () => {
   });
 
   it("returns an empty page when stage is combined with a status that is not open", async () => {
-    const response = await list(request("GET", undefined, "?projectId=project-a&status=closed&stage=reported"));
+    const response = await list(request("GET", undefined, "?projectId=project-a&status=closed&stage=confirming"));
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ items: [], nextCursor: null });
     expect(db.bug.findMany).not.toHaveBeenCalled();
@@ -305,7 +330,7 @@ describe("agent issue reads", () => {
     const cases: [string, string][] = [
       ["status=unknown", "status must be one of open, in_progress, resolved, closed."],
       ["severity=urgent", "severity must be one of low, medium, high, critical."],
-      ["stage=queued", "stage must be one of reported, confirmed, ready."],
+      ["stage=idea", "stage must be one of confirming, ready."],
       ["assignee=%20", 'assignee must be "none" or a valid user id.'],
     ];
     for (const [query, error] of cases) {
@@ -401,32 +426,36 @@ describe("agent comment paging (#604)", () => {
   });
 });
 
-describe("agent issue creation via the real shared create policy", () => {
+describe("agent idea creation via the real shared create policy (#idea-table)", () => {
   it("stores the owner as reporter and the agent as author, and ignores client severity", async () => {
     const response = await create(request("POST", { ...validBody, areaId: "area-ui", severity: "critical" }));
     expect(response.status).toBe(201);
-    expect(db.bug.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
-      tenantId: "tenant-a", projectId: "project-a", reporterId: "owner-a", beneficiaryUserId: "owner-a", createdByAgentId: "agent-a", severity: "medium", status: "open", areaId: "area-ui",
-    }) }));
-    expect(db.idempotencyKey.update).toHaveBeenCalledWith({ where: { id: "held-key" }, data: { bugId: issue.id } });
+    const data = db.idea.create.mock.calls[0][0].data;
+    expect(data).toMatchObject({
+      tenantId: "tenant-a", projectId: "project-a", reporterId: "owner-a", beneficiaryUserId: "owner-a", createdByAgentId: "agent-a", areaId: "area-ui",
+    });
+    expect(data).not.toHaveProperty("severity");
+    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idempotencyKey.update).toHaveBeenCalledWith({ where: { id: "held-key" }, data: { ideaId: idea.id } });
     expect(db.agentEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({
-      tenantId: "tenant-a", type: "issue.created", actorAgentId: "agent-a", bugId: issue.id,
-      payload: { issueId: issue.id, projectId: "project-a", beneficiaryUserId: "owner-a" },
+      tenantId: "tenant-a", type: "idea.created", actorAgentId: "agent-a", bugId: null, projectId: "project-a",
+      payload: { ideaId: idea.id, ideaNumber: 1, projectId: "project-a", beneficiaryUserId: "owner-a" },
     }) }));
-    expect(db.agentAuditEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "issue.created", bugId: issue.id }) }));
+    expect(db.agentAuditEvent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "idea.created", target: "idea:idea-a" }) }));
+    expect((await response.json()).idea).toMatchObject({ id: idea.id, number: 1, ideaThreshold: 3, convertible: false });
   });
 
   it("refuses a body that names a beneficiary (#494)", async () => {
     const response = await create(request("POST", { ...validBody, beneficiaryUserId: "beneficiary-a" }));
     expect(response.status).toBe(422);
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
     expect(db.idempotencyKey.update).not.toHaveBeenCalled();
   });
 
   it("defaults the beneficiary to the owner, including when severity is invalid", async () => {
     expect((await create(request("POST", { ...validBody, severity: { arbitrary: true } }, ""))).status).toBe(201);
     expect(db.membership.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { tenantId_userId: { tenantId: "tenant-a", userId: "owner-a" } } }));
-    expect(db.bug.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ beneficiaryUserId: "owner-a", severity: "medium" }) }));
+    expect(db.idea.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ beneficiaryUserId: "owner-a" }) }));
   });
 
   it("rejects a reporter outside the tenant and an inactive platform", async () => {
@@ -434,54 +463,54 @@ describe("agent issue creation via the real shared create policy", () => {
     expect((await create(request("POST", validBody))).status).toBe(422);
     db.category.findFirst.mockResolvedValueOnce(null);
     expect((await create(request("POST", { ...validBody, categoryId: "inactive" }))).status).toBe(422);
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
   });
 
   it("requires idempotency, validates JSON, and rejects assignment/status injection", async () => {
     const missing = request("POST", validBody);
     missing.headers.delete("Idempotency-Key");
     expect((await create(missing)).status).toBe(400);
-    const malformed = new NextRequest("http://localhost/api/v1/issues", { method: "POST", headers: { authorization: "Bearer ziki_test-key" }, body: "{" });
+    const malformed = new NextRequest("http://localhost/api/v1/ideas", { method: "POST", headers: { authorization: "Bearer ziki_test-key" }, body: "{" });
     expect((await create(malformed)).status).toBe(400);
     for (const extra of [{ status: "closed" }, { assigneeId: "person-a" }]) {
       expect((await create(request("POST", { ...validBody, ...extra }))).status).toBe(422);
     }
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
   });
 
   it("returns the policy's replay without inserting again", async () => {
     db.idempotencyKey.findUnique.mockResolvedValueOnce({
-      bugId: issue.id,
+      ideaId: idea.id,
       requestHash: createRequestHash(validBody),
       createdAt: new Date(),
     });
     const response = await create(request("POST", validBody));
     expect(response.status).toBe(200);
     expect((await response.json()).replayed).toBe(true);
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
     expect(db.agentEvent.create).not.toHaveBeenCalled();
   });
 
   it("does not return a replay from a different project", async () => {
     db.idempotencyKey.findUnique.mockResolvedValueOnce({
-      bugId: "foreign-issue",
+      ideaId: "foreign-idea",
       requestHash: createRequestHash(validBody),
       createdAt: new Date(),
     });
-    db.bug.findFirst.mockResolvedValueOnce(null);
+    db.idea.findFirst.mockResolvedValueOnce(null);
     expect((await create(request("POST", validBody))).status).toBe(404);
   });
 
   it("returns 409 when the same idempotency key is reused with a different body (#531)", async () => {
     db.idempotencyKey.findUnique.mockResolvedValueOnce({
-      bugId: issue.id,
+      ideaId: idea.id,
       requestHash: "different-hash",
       createdAt: new Date(),
     });
     const response = await create(request("POST", validBody));
     expect(response.status).toBe(409);
     expect((await response.json()).error).toBe("idempotency_conflict");
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
   });
 
   it("returns the shared similar-issue conflict and accepts an explicit acknowledgement", async () => {
@@ -489,14 +518,14 @@ describe("agent issue creation via the real shared create policy", () => {
     const response = await create(request("POST", { ...validBody, acknowledgeSimilar: false }));
     expect(response.status).toBe(409);
     expect((await response.json()).error).toBe("similar_issues");
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
     expect((await create(request("POST", validBody))).status).toBe(201);
   });
 
   it("returns the shared inactive-type rejection", async () => {
     db.issueType.findUnique.mockResolvedValue({ isActive: false });
     expect((await create(request("POST", { ...validBody, typeId: "inactive" }))).status).toBe(422);
-    expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.create).not.toHaveBeenCalled();
   });
 });
 
@@ -667,13 +696,6 @@ describe("agent comments and issues notify people (#533)", () => {
     expect(notifyLater).not.toHaveBeenCalled();
   });
 
-  it("tells people mentioned in an agent's new issue", async () => {
-    db.bug.findFirst.mockResolvedValue({ ...issue, description: "Seen by @[Bob](bob) on Safari" });
-    expect((await create(request("POST", validBody))).status).toBe(201);
-    expect(notifyLater).toHaveBeenCalledWith(expect.objectContaining({
-      kind: "mentioned", place: "description", recipientIds: ["bob"], bugId: issue.id, actorId: "owner-a", actorName: "Agent A",
-    }));
-  });
 });
 
 describe("agents attach files to issues and comments (#645)", () => {
@@ -682,7 +704,7 @@ describe("agents attach files to issues and comments (#645)", () => {
     const response = await comment(request("POST", { body: "Screenshot and HAR attached.", attachmentIds: ["att-1", "att-2"] }), context);
     expect(response.status).toBe(201);
     expect(db.attachment.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["att-1", "att-2"] }, uploaderId: "owner-a", bugId: null, commentId: null },
+      where: { id: { in: ["att-1", "att-2"] }, uploaderId: "owner-a", bugId: null, ideaId: null, commentId: null },
       data: { bugId: issue.id, commentId: "comment-a" },
     });
   });
@@ -695,13 +717,13 @@ describe("agents attach files to issues and comments (#645)", () => {
     expect(db.agentEvent.create).not.toHaveBeenCalled();
   });
 
-  it("links uploads named on a new issue", async () => {
+  it("links uploads named on a new idea", async () => {
     db.attachment.updateMany.mockResolvedValue({ count: 1 });
     const response = await create(request("POST", { ...validBody, attachmentIds: ["att-9"] }));
     expect(response.status).toBe(201);
     expect(db.attachment.updateMany).toHaveBeenCalledWith({
-      where: { id: { in: ["att-9"] }, uploaderId: "owner-a", bugId: null, commentId: null },
-      data: { bugId: issue.id, commentId: null },
+      where: { id: { in: ["att-9"] }, uploaderId: "owner-a", bugId: null, ideaId: null, commentId: null },
+      data: { ideaId: idea.id },
     });
   });
 
@@ -768,7 +790,7 @@ describe("issue read confirmation", () => {
   async function readIssue() {
     const response = await read(request(), context);
     expect(response.status).toBe(200);
-    return (await response.json()).issue as { confirmed: boolean; intake: "idea" | "issue"; validations: Array<{ id: string; createdAt: string }> };
+    return (await response.json()).issue as { confirmed: boolean; stage: string | null; validations: Array<{ id: string; createdAt: string }> };
   }
 
   it("returns validations newest-first and confirmed false with no accepts", async () => {
@@ -779,7 +801,6 @@ describe("issue read confirmation", () => {
 
     const body = await readIssue();
     expect(body.confirmed).toBe(false);
-    expect(body.intake).toBe("idea");
     expect(body.validations.map((row) => row.id)).toEqual(["v-new", "v-old"]);
     expect(body.validations[0]?.createdAt).toBe(newer.createdAt.toISOString());
 
@@ -805,7 +826,7 @@ describe("issue read confirmation", () => {
   });
 
   function triageClear(id: string, agentId: string, ownerUserId: string) {
-    return { id, agentId, onBehalfOfUserId: ownerUserId, agent: { id: agentId, ownerUserId, level: "triager" } };
+    return { id, agentId, onBehalfOfUserId: ownerUserId, agent: { id: agentId, ownerUserId, level: "working" } };
   }
 
   it("is confirmed once two distinct owners have accepted", async () => {
@@ -817,29 +838,22 @@ describe("issue read confirmation", () => {
     ]);
     const body = await readIssue();
     expect(body.confirmed).toBe(true);
-    expect(body.intake).toBe("idea");
   });
 
-  it("passes a confirmed report on as an issue once it has three upvotes", async () => {
-    db.bug.findFirst.mockResolvedValue({ ...issue, status: "open", voteCount: 3 });
+  it("is ready once confirmed, and names the idea it was converted from (#idea-table)", async () => {
+    db.bug.findFirst.mockResolvedValue({ ...issue, status: "open", voteCount: 0, idea: { id: "idea-a", number: 1, score: 3, convertedAt: new Date("2026-10-20T00:00:00Z") } });
     db.issueValidation.findMany.mockResolvedValue([
       accept("v1", "r1", "rob"),
       accept("v2", "r2", "sam"),
       triageClear("vt", "t1", "tia"),
     ]);
-    const body = await readIssue();
+    const body = (await readIssue()) as unknown as { confirmed: boolean; stage: string; idea: { number: number } };
     expect(body.confirmed).toBe(true);
-    expect(body.intake).toBe("issue");
-  });
-
-  it("shows the upvote count and the threshold an idea needs (#463)", async () => {
-    db.bug.findFirst.mockResolvedValue({ ...issue, status: "open", voteCount: 2 });
-    db.issueValidation.findMany.mockResolvedValue([accept("v1", "r1", "rob"), accept("v2", "r2", "sam")]);
-    const body = (await readIssue()) as unknown as { voteCount: number; voteThreshold: number; intake: string };
-    expect(body.voteCount).toBe(2);
-    expect(body.voteThreshold).toBe(3);
-    expect(body.intake).toBe("idea");
-    expect(db.bug.findFirst.mock.calls.at(-1)?.[0]?.select.voteCount).toBe(true);
+    expect(body.stage).toBe("ready");
+    expect(body.idea.number).toBe(1);
+    const select = db.bug.findFirst.mock.calls.at(-1)?.[0]?.select;
+    expect(select.idea).toEqual({ select: { id: true, number: true, score: true, convertedAt: true } });
+    expect(select).not.toHaveProperty("ideaScore");
   });
 
   it("shows the linked fix and the commit a verdict would test (#544)", async () => {

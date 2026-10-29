@@ -7,9 +7,16 @@ import { TOOLS, buildRequest } from "./tools.js";
 const repo = path.resolve(import.meta.dirname, "../../..");
 const docs = readFileSync(path.join(repo, "docs/ziki-for-agents.md"), "utf8");
 
-// `/issues/{id}/bid` lives at app/api/v1/issues/[id]/bid/route.ts.
-function routeFile(route: string) {
-  return path.join(repo, "app/api/v1", route.replace(/\{(\w+)\}/g, "[$1]"), "route.ts");
+// `/issues/{id}/bid` lives at app/api/v1/issues/[id]/bid/route.ts. A site-root
+// route such as the work feed `/{projectId}/work` lives at app/[project]/work/route.ts.
+function routeFile(tool: (typeof TOOLS)[number]) {
+  if (tool.siteRoute) return path.join(repo, "app", tool.route.replace(/\{(\w+)\}/g, "[project]"), "route.ts");
+  return path.join(repo, "app/api/v1", tool.route.replace(/\{(\w+)\}/g, "[$1]"), "route.ts");
+}
+
+/** How the agent reference titles a tool's route. */
+function docHeading(tool: (typeof TOOLS)[number]) {
+  return tool.siteRoute ? `${tool.method} ${tool.route.replace(/\{\w+\}/, "{project}")}` : `${tool.method} /api/v1${tool.route}`;
 }
 
 describe("tool table matches the API", () => {
@@ -19,7 +26,7 @@ describe("tool table matches the API", () => {
   });
 
   it.each(TOOLS.map((tool) => [tool.name, tool] as const))("%s wraps a real route", (_name, tool) => {
-    const file = routeFile(tool.route);
+    const file = routeFile(tool);
     expect(existsSync(file), `${file} should exist`).toBe(true);
     const source = readFileSync(file, "utf8");
     expect(source).toMatch(
@@ -31,7 +38,7 @@ describe("tool table matches the API", () => {
 
   it.each(TOOLS.map((tool) => [tool.name, tool] as const))("%s is documented in the agent API reference", (_name, tool) => {
     // Docs write the heading as `### POST /api/v1/...` or `### \`GET /api/v1/...\``.
-    const heading = `${tool.method} /api/v1${tool.route}`;
+    const heading = docHeading(tool);
     expect(docs.replace(/`/g, "")).toContain(heading);
   });
 
@@ -83,13 +90,13 @@ describe("buildRequest", () => {
 
   it("sends the idempotency key as a header, deriving a stable one unless given (#633)", () => {
     const input = { title: "Bug title", description: "Steps to reproduce" };
-    const a = buildRequest(tool("ziki_create_issue"), input, { projectId: "p" });
-    const b = buildRequest(tool("ziki_create_issue"), input, { projectId: "p" });
+    const a = buildRequest(tool("ziki_create_idea"), input, { projectId: "p" });
+    const b = buildRequest(tool("ziki_create_idea"), input, { projectId: "p" });
     expect(a.headers?.["Idempotency-Key"]).toBeTruthy();
     // A retry of the same call must reuse the key, or the API cannot deduplicate it.
     expect(a.headers?.["Idempotency-Key"]).toBe(b.headers?.["Idempotency-Key"]);
     expect(a.body).not.toHaveProperty("idempotencyKey");
-    const fixed = buildRequest(tool("ziki_create_issue"), { ...input, idempotencyKey: "k" }, { projectId: "p" });
+    const fixed = buildRequest(tool("ziki_create_idea"), { ...input, idempotencyKey: "k" }, { projectId: "p" });
     expect(fixed.headers).toEqual({ "Idempotency-Key": "k" });
   });
 
@@ -97,9 +104,9 @@ describe("buildRequest", () => {
     // The derived key deduplicates retries, so a deliberate repeat — filing the
     // same report twice on purpose — has to opt out by supplying its own key.
     const input = { title: "Same title", description: "Same description" };
-    const derived = buildRequest(tool("ziki_create_issue"), input, { projectId: "p" });
-    const first = buildRequest(tool("ziki_create_issue"), { ...input, idempotencyKey: "deliberate-1" }, { projectId: "p" });
-    const second = buildRequest(tool("ziki_create_issue"), { ...input, idempotencyKey: "deliberate-2" }, { projectId: "p" });
+    const derived = buildRequest(tool("ziki_create_idea"), input, { projectId: "p" });
+    const first = buildRequest(tool("ziki_create_idea"), { ...input, idempotencyKey: "deliberate-1" }, { projectId: "p" });
+    const second = buildRequest(tool("ziki_create_idea"), { ...input, idempotencyKey: "deliberate-2" }, { projectId: "p" });
     expect(first.headers?.["Idempotency-Key"]).toBe("deliberate-1");
     expect(second.headers?.["Idempotency-Key"]).toBe("deliberate-2");
     expect(first.headers?.["Idempotency-Key"]).not.toBe(second.headers?.["Idempotency-Key"]);
@@ -109,7 +116,7 @@ describe("buildRequest", () => {
 
   it("derives a different idempotency key for a different call (#633)", () => {
     const key = (input: Record<string, unknown>, projectId: string | null = "p") =>
-      buildRequest(tool("ziki_create_issue"), input, { projectId }).headers?.["Idempotency-Key"];
+      buildRequest(tool("ziki_create_idea"), input, { projectId }).headers?.["Idempotency-Key"];
     const base = { title: "Bug title", description: "Steps to reproduce" };
     expect(key(base)).not.toBe(key({ ...base, title: "Another title" }));
     expect(key(base)).not.toBe(key({ ...base, description: "Different steps" }));

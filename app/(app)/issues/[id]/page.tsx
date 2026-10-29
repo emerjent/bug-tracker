@@ -8,14 +8,14 @@ import { agentMentionId } from "@/lib/mentions";
 import { requireUser } from "@/lib/auth-helpers";
 import { bugInTenant, currentTenantIdFor } from "@/lib/tenant-context";
 import { viewerBugScope } from "@/lib/tenant-viewer";
-import { issuePath, parseIssueRef, queryString, resolveIssueRef } from "@/lib/issue-ref";
+import { ideaPath, issuePath, parseIssueRef, queryString, resolveIssueRef } from "@/lib/issue-ref";
 import { resolveSessionUserId } from "@/lib/session-user";
 import { LocalTime } from "@/components/local-time";
 import { ClearDuplicateButton, MarkDuplicateButton } from "@/components/duplicate-controls";
 import { currentResolution, isFinishedStatus, type StatusChangeActivity } from "@/lib/resolution-note";
 import { statusLabel as resolutionStatusLabel } from "@/lib/labels";
 import { formatIssueNumber } from "@/lib/issue-number";
-import { intakeDetail, openIssueStages, type IssueStage } from "@/lib/issue-stage";
+import { openIssueConfirmations, stageDetail, type IssueConfirmation, type IssueStage } from "@/lib/issue-stage";
 import { buildCommentTree } from "@/lib/comments";
 import {
   COMMENT_PARAM,
@@ -56,6 +56,8 @@ import { IssueBids } from "@/components/issue-bids";
 import { GoalBudgetSection } from "@/components/goal-budgets";
 import { Badge } from "@/components/ui/badge";
 import { VoteButton } from "@/components/vote-button";
+import { type IdeaVerdictsData } from "@/components/idea-verdicts";
+import { listIdeaVerdicts } from "@/lib/agent-api/idea-verdicts";
 import { UpdateIssueForm } from "@/components/update-issue-form";
 import { AddCommentDialog } from "@/components/add-comment-dialog";
 import type { DisputeRole } from "@/components/comment-form";
@@ -95,6 +97,7 @@ import { AgentResolvedNotice } from "@/components/agent-resolved-notice";
 import { issueStageLabels } from "@/lib/issue-stage";
 import { ReviewStatusBadge } from "@/components/review-status-badge";
 import { SubmissionEvidence } from "@/components/submission-evidence";
+import { voteDirection } from "@/lib/voting";
 import {
   issueChipBaseClass,
   issueSeverityChipClass,
@@ -127,14 +130,14 @@ async function loadOptional<T>(label: string, fallback: T, load: () => Promise<T
   }
 }
 
-/** A merger rejection's notes (#1429), from its audit payload. */
+/** A manager agent's rejection notes (#1429), from its audit payload. */
 function payloadNotes(payload: unknown): string | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const notes = (payload as { notes?: unknown }).notes;
   return typeof notes === "string" && notes.trim() ? notes : null;
 }
 
-/** Why an admin merger's deployment failed (#1446), from its audit payload. */
+/** Why a merger agent's deployment failed (#1446), from its audit payload. */
 function payloadReason(payload: unknown): string | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const reason = (payload as { reason?: unknown }).reason;
@@ -298,7 +301,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       include: {
         type: { select: { id: true, name: true, isActive: true } },
         reporter: { select: { name: true, email: true, role: true, image: true } },
-        createdByAgent: { select: { id: true, name: true } },
+        createdByAgent: { select: { id: true, name: true, ownerUserId: true } },
+        idea: { select: { id: true, number: true, convertedAt: true } },
         milestone: { select: { id: true, title: true, dueDate: true, isClosed: true } },
         assignee: { select: { id: true, name: true, role: true, image: true } },
         category: { select: { id: true, name: true, isActive: true } },
@@ -332,7 +336,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
         include: {
           type: { select: { id: true, name: true, isActive: true } },
           reporter: { select: { name: true, email: true, role: true, image: true } },
-          createdByAgent: { select: { id: true, name: true } },
+          createdByAgent: { select: { id: true, name: true, ownerUserId: true } },
+          idea: { select: { id: true, number: true, convertedAt: true } },
           assignee: { select: { id: true, name: true, role: true, image: true } },
           category: { select: { id: true, name: true, isActive: true } },
           area: { select: { id: true, name: true } },
@@ -536,8 +541,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                 onBehalfOf: { select: { name: true } },
               },
             }),
-            // #1429: a merger's rejection is a merge decision too, and #1446 an
-            // admin merger's failed deployment.
+            // #1429: a manager agent's rejection is a merge decision too, and #1446 a
+            // merger agent's failed deployment.
             prisma.agentAuditEvent.findMany({
               where: { bugId: id, action: { in: ["issue.accepted", "issue.merge_rejected", "github.merge_failed"] } },
               orderBy: { createdAt: "asc" },
@@ -552,7 +557,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           ]);
 
           const mergerDecisions: AgentDecision[] = accepted
-            .filter((e) => e.agent.level === "merger" || e.agent.level === "admin_merger")
+            .filter((e) => e.agent.level === "manager" || e.agent.level === "merger")
             .map<AgentDecision>((e) =>
               e.action === "issue.merge_rejected"
                 ? {
@@ -638,7 +643,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
             ...accepted
               .filter(
                 (e) =>
-                  e.action === "issue.accepted" && e.agent.level !== "merger" && e.agent.level !== "admin_merger",
+                  e.action === "issue.accepted" && e.agent.level !== "manager" && e.agent.level !== "merger",
               )
               .map<AgentDecision>((e) => ({
                 id: `accepted-${e.id}`,
@@ -661,7 +666,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       ),
       loadOptional<number>("volunteers", 0, () =>
         prisma.issueInterest.count({
-          where: { bugId: id, withdrawnAt: null },
+          where: { bugId: id, withdrawnAt: null, agent: { revokedAt: null } },
         }),
       ),
       loadOptional("pendingApproval", null, () =>
@@ -701,13 +706,22 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
 
   const milestoneOptions = await milestoneOptionsPromise;
   let intakeStage: IssueStage | null = null;
+  let confirmation: IssueConfirmation | null = null;
   if (!bug.isDeleted && bug.status === "open") {
     try {
-      intakeStage = (await openIssueStages(prisma, { id: bug.id })).get(bug.id) ?? null;
+      confirmation = (await openIssueConfirmations(prisma, { id: bug.id })).get(bug.id) ?? null;
+      intakeStage = confirmation?.stage ?? null;
     } catch (error) {
       console.error("[bugs] issue stage lookup failed", error);
     }
   }
+  // #idea-table: the verdicts of the idea this issue was converted from, for the Idea stage.
+  const sourceIdea = bug.idea;
+  const ideaVerdicts: IdeaVerdictsData | null = sourceIdea
+    ? await loadOptional<IdeaVerdictsData | null>("idea verdicts", null, () =>
+        listIdeaVerdicts({ tenantId: bug.tenantId, projectId: bug.projectId }, sourceIdea.id),
+      )
+    : null;
   const isAssignee = !!userId && bug.assigneeId === userId;
   const canUpdateStatus = canTriage || isAssignee;
   const canEdit =
@@ -725,11 +739,10 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       membershipRole: access.membershipRole,
       currentAssigneeId: bug.assigneeId,
       targetAssigneeId: isAssignee ? null : userId,
-      voteCount: bug.voteCount,
     });
   const userVote =
     Array.isArray(bug.votes) && bug.votes.length > 0
-      ? (bug.votes[0].value ?? 1)
+      ? voteDirection(bug.votes[0].value ?? 1)
       : 0;
   const commentTree = buildCommentTree(comments.comments);
   // #1446: the stage the page opens on, and what each stage holds.
@@ -741,8 +754,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     ideaAccepted: intakeStage === "ready",
   });
   // When each stage began, so every comment lands in the stage it was posted in.
-  const starts = stageStarts(agentDecisions);
-  const stageCommentCounts: Record<DecisionStage, number> = { idea: 0, open: 0, done: 0, ready: 0, live: 0 };
+  const starts = stageStarts(agentDecisions, sourceIdea?.convertedAt ?? null);
+  const stageCommentCounts: Record<DecisionStage, number> = { idea: 0, confirm: 0, open: 0, done: 0, ready: 0, live: 0 };
   for (const comment of commentTree) {
     stageCommentCounts[stageOfComment(comment.type, comment.createdAt, starts)] += 1;
   }
@@ -1002,7 +1015,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               likeVoters={voterSummary.likes.voters}
               size="md"
               showAvatars={false}
-              showReadinessGate={false}
               readOnly={bug.isDeleted}
             />
           </div>
@@ -1092,6 +1104,12 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                   setback={bug.reviewStatus === "rejected"}
                   pullRequestUrl={bug.pullRequestUrl}
                   severity={bug.severity}
+                  ideaVerdicts={
+                    ideaVerdicts
+                      ? { score: ideaVerdicts.ideaScore, threshold: ideaVerdicts.ideaThreshold, votes: ideaVerdicts.votes }
+                      : undefined
+                  }
+                  confirmation={confirmation}
                 />
                 {comments.hiddenThreads > 0 ? (
                   <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-zk-chip px-3 py-2 text-sm text-zk-text2 print:hidden">
@@ -1209,11 +1227,21 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               </Badge>
               {intakeStage ? (
                 // What the stage means stays one hover away now the note under the chips is gone.
-                <span title={intakeDetail(intakeStage, bug.voteCount)} className="inline-flex">
+                <span
+                  title={stageDetail(intakeStage)} className="inline-flex">
                   <Badge className={`${issueChipBaseClass} ${issueStageChipClass[intakeStage]}`}>
                     {issueStageLabels[intakeStage]}
                   </Badge>
                 </span>
+              ) : null}
+              {sourceIdea ? (
+                <Link
+                  href={ideaPath(sourceIdea.number)}
+                  data-testid="source-idea-link"
+                  className={`${issueChipBaseClass} bg-zk-chip text-zk-text2 hover:underline`}
+                >
+                  From idea #{sourceIdea.number}
+                </Link>
               ) : null}
               {bug.isBoosted && !bug.isDeleted ? (
                 <span className={`${issueChipBaseClass} border border-zk-warn-bd bg-zk-warn-bg text-zk-warn-fg`}>Boosted</span>

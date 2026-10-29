@@ -15,12 +15,13 @@ function agent(overrides: Partial<ManageAgentItem>): ManageAgentItem {
     id: "agent_1",
     name: "Pixel",
     model: "Claude",
-    level: "contributor",
+    level: "working",
     burst: false,
     burstUntil: null,
     createdAt: "2026-10-01T10:00:00.000Z",
     revokedAt: null,
     personal: false,
+    avatar: null,
     currentProjectId: "proj_1",
     recent: true,
     apiKeys: [{ id: "key_1", prefix: "zk_ab", apiKey: "zk_secret", projectId: "proj_1", projectName: "Alpha", lastUsedAt: null }],
@@ -34,7 +35,7 @@ function renderList(agents: ManageAgentItem[]) {
       agents={agents}
       activeCount={agents.length}
       maxActive={5}
-      levels={["observer", "contributor"]}
+      levels={["working"]}
       projects={[{ id: "proj_1", name: "Alpha" }]}
       now="2026-10-28T10:00:00.000Z"
       canSetBurst={false}

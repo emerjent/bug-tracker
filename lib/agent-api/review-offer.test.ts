@@ -10,7 +10,7 @@ import {
   REVIEW_OFFER_TTL_MS,
   REVIEW_DEADLINE_MS,
 } from "./review-offer";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 
 const db = vi.hoisted(() => ({
   bug: { findFirst: vi.fn(), update: vi.fn() },
@@ -191,7 +191,7 @@ describe("acceptReviewOffer (#597)", () => {
     name: "bob-agent",
     ownerId: "bob",
     tenantId: "tenant-zedu",
-    level: "reviewer" as const,
+    level: "working" as const,
     burst: false,
     keyId: "k1",
   };

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 import { assertKeyProject, type AgentContext } from "@/lib/agents/require-agent";
 import { audit } from "@/lib/agents/audit";
 import { isOrganizationAdmin } from "@/lib/organization-role";
@@ -33,7 +33,7 @@ export async function agentNotesActor(agent: AgentContext, projectId: string): P
   return {
     userId: agent.ownerId, name: agent.name, tenantId: agent.tenantId, projectId, agent,
     // Existing organization authority and trusted admin merger grant; no new role.
-    canEdit: isOrganizationAdmin(membership.role, agent.ownerRole) || agent.level === "admin_merger",
+    canEdit: isOrganizationAdmin(membership.role, agent.ownerRole) || agent.level === "merger",
   };
 }
 

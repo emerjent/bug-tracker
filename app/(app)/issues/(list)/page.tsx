@@ -18,6 +18,8 @@ import type { AppRole } from "@/lib/roles";
 import { IssueFilters } from "@/components/issue-filters";
 import { RowAge, RowAssignee } from "@/components/issue-row-meta";
 import { VoteButton } from "@/components/vote-button";
+import { IdeasList, type IdeaListRow } from "@/components/ideas-list";
+import { workflowFor } from "@/lib/workflow";
 import { severityLabels } from "@/lib/labels";
 import { severities } from "@/lib/validations/issue";
 import { boundSearchTerm, escapeSearchQuery, toSingleQueryParam } from "@/lib/search";
@@ -36,6 +38,7 @@ import {
   isDone,
   parseShowResolved,
   resultCountText,
+  statusFilterLabel,
   statusFilterWhere,
 } from "@/lib/issue-state";
 import { calculatePagination } from "@/lib/pagination";
@@ -87,8 +90,8 @@ import { IssuesToolsToggle } from "@/components/issues-tools-toggle";
 import { LoadError } from "@/components/load-error";
 import { logLoadFailure } from "@/lib/load-error";
 import { AREA_PARAM, parseProjectAreaFilter, projectAreaFilterWhere } from "@/lib/project-area-filter";
-import { openIssueStages, parseIssueStageView, type IssueStage, type IssueStageView } from "@/lib/issue-stage";
-import { isUnstructuredDraft } from "@/lib/ideas";
+import { openIssueStages, parseIssueStageView, type IssueStage } from "@/lib/issue-stage";
+import { voteDirection } from "@/lib/voting";
 import { issuePath } from "@/lib/issue-ref";
 import { PROJECT_ALL_PARAM, showsAllProjects } from "@/lib/issue-list-filters";
 
@@ -107,13 +110,15 @@ const ESCALATED_WHERE = { some: { answeredAt: null } } satisfies Prisma.AgentQue
  * waiting on a decision, and new ideas (reported, not yet confirmed).
  */
 const INBOX_PARAM = "inbox";
-type InboxView = "input" | "design" | "ideas" | "drafts";
+type InboxView = "input" | "design";
 const INBOX_TABS: { view: InboxView; label: string }[] = [
   { view: "input", label: "Need your input" },
   { view: "design", label: "Design feedback needed" },
-  { view: "ideas", label: "New ideas" },
-  { view: "drafts", label: "Drafted ideas" },
 ];
+/** `?status=ideas`: the Ideas tab. Ideas are not issues and come from their own table (#idea-table). */
+const IDEAS_STATUS = "ideas";
+/** Most ideas the tab lists, highest score first. */
+const IDEAS_LIMIT = 100;
 const DESIGN_WHERE = { some: { status: "proposed" } } satisfies Prisma.RedesignProposalListRelationFilter;
 const AGENT_ORDER = { waiting: 0, working: 1, idle: 2, offline: 3 } as const;
 
@@ -122,18 +127,34 @@ const REJECTED_STATUS = "rejected";
 const REJECTED_WHERE = { some: { kind: "real", verdict: "reject" } } satisfies Prisma.IssueValidationListRelationFilter;
 /** `?status=duplicate`: marked as a duplicate of another issue. */
 const DUPLICATE_STATUS = "duplicate";
-/** `?status=ready_to_merge`: resolved issues whose fix is ready for admin merge (#SDLC). */
+/**
+ * `?status=ready_to_merge`: accepted fixes waiting for a merger agent (#SDLC).
+ * Accepting a fix leaves the issue open or in progress, so the tab takes any
+ * status but closed, and Open and In progress leave these out.
+ */
 const READY_TO_MERGE_STATUS = "ready_to_merge";
 /** `?status=auto_merge`: resolved issues whose fix is live — merged to dev, staging, main/production (#SDLC). */
 const AUTO_MERGE_STATUS = "auto_merge";
+/**
+ * `?status=resolved`: the Done tab (Ziki #713). A pull request is linked and
+ * the project's required independent reviewers said it is good to merge
+ * (review status `tested`). It follows the work, not a status a person set:
+ * Open and In progress leave these out, as they do for Ready to Merge.
+ */
+const DONE_STATUS = "resolved";
+/** Statuses an accepted fix can have while it waits to be merged. */
+const READY_TO_MERGE_STATUSES = ["open", "in_progress", "resolved"] as const;
 
 /** The filters under the All tab. Open, In progress and Done have tabs of their own. */
-const ALL_FILTERS = [
-  { value: ALL_STATUS, label: "All" },
-  { value: "closed", label: "Closed" },
-  { value: REJECTED_STATUS, label: "Rejected" },
-  { value: DUPLICATE_STATUS, label: "Duplicates" },
-] as const;
+const ALL_FILTERS = [ALL_STATUS, "closed", REJECTED_STATUS, DUPLICATE_STATUS].map((value) => ({
+  value,
+  label: statusFilterLabel(value),
+}));
+/** The status tabs, left to right. */
+const STATUS_TABS = [IDEAS_STATUS, "open", "in_progress", DONE_STATUS, READY_TO_MERGE_STATUS, AUTO_MERGE_STATUS, ALL_STATUS].map((value) => ({
+  value,
+  label: statusFilterLabel(value),
+}));
 
 /** New issue as a 32px + button; the name is kept for screen readers and the tooltip. */
 function NewIssueButton({ className = "" }: { className?: string }) {
@@ -330,6 +351,17 @@ export default async function BugsPage({
   const hidesResolved = statusParam === ESCALATED_STATUS && !isDeletedView && !showResolved;
   if (statusWhere !== undefined) {
     where.status = statusWhere;
+    // An accepted fix waiting to be merged is on the Ready to Merge tab instead.
+    if ((statusParam === "open" || statusParam === "in_progress") && !isDeletedView) {
+      where.AND = [{ OR: [{ reviewStatus: null }, { reviewStatus: { not: "ready_to_merge" } }] }];
+    }
+    // A tested fix (two good-to-merge verdicts) is on the Done tab instead (Ziki #713).
+    if ((statusParam === "open" || statusParam === "in_progress") && !isDeletedView) {
+      where.AND = [
+        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
+        { OR: [{ reviewStatus: null }, { reviewStatus: { not: "tested" } }] },
+      ];
+    }
   } else if (hidesResolved) {
     where.status = defaultStatusWhere(false);
   }
@@ -339,16 +371,18 @@ export default async function BugsPage({
   const inboxParam = toSingleQueryParam(params[INBOX_PARAM]);
   const inboxView: InboxView | null = !isEscalatedView
     ? null
-    : inboxParam === "design" || inboxParam === "ideas" || inboxParam === "drafts"
+    : inboxParam === "design"
       ? inboxParam
       : "input";
   if (inboxView === "input") {
     where.agentQuestions = ESCALATED_WHERE;
   } else if (inboxView === "design") {
     where.redesigns = DESIGN_WHERE;
-  } else if (inboxView === "drafts") {
-    where.createdByAgentId = null;
   }
+  // The Ideas tab lists the Idea table, not issues: no issue row matches it.
+  const stageParam = toSingleQueryParam(params.stage);
+  const isIdeasView = (statusParam === IDEAS_STATUS || stageParam === "ideas") && !isDeletedView;
+  if (isIdeasView) where.id = { in: [] };
   if (statusParam === REJECTED_STATUS && !isDeletedView) {
     where.validations = REJECTED_WHERE;
   }
@@ -356,12 +390,16 @@ export default async function BugsPage({
     where.duplicateOfId = { not: null };
   }
   if (statusParam === READY_TO_MERGE_STATUS && !isDeletedView) {
-    where.status = "resolved";
+    where.status = { in: [...READY_TO_MERGE_STATUSES] };
     where.reviewStatus = "ready_to_merge";
   }
   if (statusParam === AUTO_MERGE_STATUS && !isDeletedView) {
     where.status = "resolved";
     where.reviewStatus = "merged";
+  }
+  if (statusParam === DONE_STATUS && !isDeletedView) {
+    where.status = { in: [...READY_TO_MERGE_STATUSES] };
+    where.reviewStatus = "tested";
   }
   if (isSeverity(severityParam)) {
     where.severity = severityParam;
@@ -411,12 +449,9 @@ export default async function BugsPage({
     }
   }
 
-  // New ideas and Drafted ideas in the Inbox are the issues still at the reported stage.
-  const stageView: IssueStageView | null = isDeletedView
+  const stageView: IssueStage | null = isDeletedView || isIdeasView
     ? null
-    : inboxView === "ideas" || inboxView === "drafts"
-      ? "reported"
-      : parseIssueStageView(toSingleQueryParam(params.stage));
+    : parseIssueStageView(toSingleQueryParam(params.stage));
   let stages = new Map<string, IssueStage>();
   if (!isDeletedView) {
     try {
@@ -446,14 +481,46 @@ export default async function BugsPage({
   // the stage clause is applied (#626): a ?stage= page must count the same
   // rows its result list shows — tabs, badges and the "Show N resolved" link
   // all follow the stage filter, not the pre-stage row set.
-  const { categoryId: _platformClause, ...platformTabWhere } = where;
+  // Count the same tenant/project and search scope without the selected tab:
+  // its status, and the extra clauses the Inbox lists, Rejected, Duplicates,
+  // Ready to Merge and Live add. Left in, those leaked into every other tab's
+  // count (on Ready to Merge, "All" only counted ready-to-merge issues).
+  const {
+    status: _selectedStatus,
+    id: _stageIds,
+    agentQuestions: _escalated,
+    validations: _rejected,
+    duplicateOfId: _duplicate,
+    redesigns: _design,
+    reviewStatus: _review,
+    AND: _notMergeStage,
+    ...tabScope
+  } = where;
+  // Put the default duplicate scope back: the Duplicates filter's override is
+  // dropped, but tabs and counts still leave out the duplicates the list hides.
+  const statusTabWhere: Prisma.BugWhereInput = { ...tabScope, ...duplicatesWhere(showDuplicates) };
+  void _design;
+  void _selectedStatus;
+  void _stageIds;
+  void _escalated;
+  void _rejected;
+  void _duplicate;
+  void _review;
+  void _notMergeStage;
+  // The platform menu counts each platform's issues whatever tab is picked,
+  // so its numbers don't move as you switch tabs; the tabs then split the
+  // picked platform's total. (Counting inside the Inbox showed 0 almost
+  // everywhere.) A ?stage= from the URL still narrows it (#626).
+  const stageFromUrl = stageView !== null;
+  const { categoryId: _platformClause, ...platformTabWhere }: Prisma.BugWhereInput = {
+    ...statusTabWhere,
+    ...(stageFromUrl ? { id: where.id } : {}),
+  };
   void _platformClause;
 
   let platformTabs: PlatformTab[] = [];
   if (!isDeletedView) {
     try {
-      // The platform menu sits beside the status tabs, so it counts within
-      // the selected tab (Open, Resolved, Escalated, ...).
       const grouped = await prisma.bug.groupBy({
         by: ["categoryId"],
         where: platformTabWhere,
@@ -488,9 +555,11 @@ export default async function BugsPage({
     const next = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
       if (key === "page" || key === PLATFORM_PARAM) continue;
+      if (isEscalatedView && (key === INBOX_PARAM || key === SHOW_RESOLVED_PARAM)) continue;
       const single = toSingleQueryParam(value);
       if (single) next.set(key, single);
     }
+    if (isEscalatedView) next.set("status", ALL_STATUS);
     if (id) next.set(PLATFORM_PARAM, id);
     const qs = next.toString();
     return qs ? `/issues?${qs}` : "/issues";
@@ -535,6 +604,7 @@ export default async function BugsPage({
         status: true,
         severity: true,
         voteCount: true,
+        projectId: true,
         isDeleted: true,
         isBoosted: true,
         duplicateOf: showDuplicates ? { select: { number: true } } : false,
@@ -575,6 +645,54 @@ export default async function BugsPage({
     return issuesQueryError(listed.reference);
   }
   const bugs = listed.bugs;
+
+  // #idea-table: the Ideas tab reads open ideas from their own table, in the
+  // same tenant, project and search scope as the issues.
+  const ideaWhere: Prisma.IdeaWhereInput = {
+    tenantId: tenantId ?? "",
+    ...(projectId && !allProjects ? { projectId } : {}),
+    isDeleted: false,
+    status: "open",
+    ...(qParam?.trim()
+      ? {
+          OR: [
+            { title: { contains: escapeSearchQuery(boundSearchTerm(qParam)), mode: "insensitive" } },
+            { description: { contains: escapeSearchQuery(boundSearchTerm(qParam)), mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+  const ideasCount = tenantId && !isDeletedView ? await loadOrEmpty("ideas tab", () => prisma.idea.count({ where: ideaWhere }), 0) : 0;
+  const ideaRows: IdeaListRow[] = isIdeasView && tenantId
+    ? await loadOrEmpty("ideas list", async () => {
+        const rows = await prisma.idea.findMany({
+          where: ideaWhere,
+          orderBy: [{ score: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+          take: IDEAS_LIMIT,
+          select: {
+            id: true, number: true, title: true, score: true, projectId: true, createdAt: true,
+            reporter: { select: { name: true } },
+            category: { select: { name: true } },
+            _count: { select: { verdicts: true } },
+          },
+        });
+        const thresholds = new Map<string, number | null>();
+        for (const id of new Set(rows.map((row) => row.projectId))) {
+          thresholds.set(id, await workflowFor(id).then((w) => w.ideaThreshold).catch(() => null));
+        }
+        return rows.map((row) => ({
+          id: row.id,
+          number: row.number,
+          title: row.title,
+          score: row.score,
+          threshold: thresholds.get(row.projectId) ?? null,
+          createdAt: row.createdAt,
+          reporterName: row.reporter.name,
+          platform: row.category?.name ?? null,
+          verdicts: row._count.verdicts,
+        }));
+      }, [] as IdeaListRow[])
+    : [];
 
   // #301: when searching, show why a row matched. Only rows whose title
   // doesn't already contain the query need their description, so the list
@@ -651,7 +769,7 @@ export default async function BugsPage({
       if (kind) add(r.bugId, { kind, count: r._count._all });
     }
     for (const e of auditRows) {
-      const merger = e.agent.level === "merger" || e.agent.level === "admin_merger";
+      const merger = e.agent.level === "manager" || e.agent.level === "merger";
       if (e.action === "issue.accepted") add(e.bugId, { kind: "accepted", merged: payloadMerged(e.payload) });
       else if (merger) add(e.bugId, { kind: e.action === "issue.merge_rejected" ? "merge_rejected" : "deploy_failed" });
     }
@@ -730,30 +848,10 @@ export default async function BugsPage({
     }),
   ).toString();
 
-  const reportedCount = [...stages.values()].filter((stage) => stage === "reported").length;
-  const confirmedCount = [...stages.values()].filter((stage) => stage === "confirmed").length;
+  const confirmingCount = [...stages.values()].filter((stage) => stage === "confirming").length;
   const readyCount = [...stages.values()].filter((stage) => stage === "ready").length;
 
-  // Count the same tenant/project and search scope without the selected status.
-  const {
-    status: _selectedStatus,
-    id: _stageIds,
-    agentQuestions: _escalated,
-    validations: _rejected,
-    duplicateOfId: _duplicate,
-    redesigns: _design,
-    ...tabScope
-  } = where;
-  // Put the default duplicate scope back: the Duplicates filter's override is
-  // dropped, but tabs and counts still leave out the duplicates the list hides.
-  const statusTabWhere: Prisma.BugWhereInput = { ...tabScope, ...duplicatesWhere(showDuplicates) };
-  void _design;
-  void _selectedStatus;
-  void _stageIds;
-  void _escalated;
-  void _rejected;
-  void _duplicate;
-  const [statusCounts, escalatedCount, rejectedCount, duplicateCount, readyToMergeCount, liveCount] = isDeletedView || !tenantId ? [[], 0, 0, 0, 0, 0] : await Promise.all([
+  const [statusCounts, escalatedCount, rejectedCount, duplicateCount, readyToMergeByStatus, liveCount, testedByStatus] = isDeletedView || !tenantId ? [[], 0, 0, 0, [], 0, []] : await Promise.all([
     loadOrEmpty("status tabs", () => prisma.bug.groupBy({
       by: ["status"], where: statusTabWhere, _count: { _all: true },
     }), []),
@@ -766,33 +864,48 @@ export default async function BugsPage({
     loadOrEmpty("duplicate filter", () => prisma.bug.count({
       where: { ...statusTabWhere, duplicateOfId: { not: null } },
     }), 0),
-    loadOrEmpty("ready to merge tab", () => prisma.bug.count({
-      where: { ...statusTabWhere, status: "resolved", reviewStatus: "ready_to_merge" },
-    }), 0),
+    loadOrEmpty("ready to merge tab", () => prisma.bug.groupBy({
+      by: ["status"],
+      where: { ...statusTabWhere, status: { in: [...READY_TO_MERGE_STATUSES] }, reviewStatus: "ready_to_merge" },
+      _count: { _all: true },
+    }), []),
     loadOrEmpty("live tab", () => prisma.bug.count({
       where: { ...statusTabWhere, status: "resolved", reviewStatus: "merged" },
     }), 0),
+    loadOrEmpty("done tab", () => prisma.bug.groupBy({
+      by: ["status"],
+      where: { ...statusTabWhere, status: { in: [...READY_TO_MERGE_STATUSES] }, reviewStatus: "tested" },
+      _count: { _all: true },
+    }), []),
   ]);
-  const countForStatus = (status: string) => statusCounts.find((row) => row.status === status)?._count._all ?? 0;
+  const readyToMergeFor = (status: string) => readyToMergeByStatus.find((row) => row.status === status)?._count._all ?? 0;
+  const readyToMergeCount = READY_TO_MERGE_STATUSES.reduce((sum, status) => sum + readyToMergeFor(status), 0);
+  // Open and In progress leave out what waits on the Ready to Merge tab, so the tabs never overlap.
+  const countForStatus = (status: string) =>
+    (statusCounts.find((row) => row.status === status)?._count._all ?? 0) -
+    (status === "open" || status === "in_progress" ? readyToMergeFor(status) : 0);
   const allCount = statusCounts.reduce((sum, row) => sum + row._count._all, 0);
+  // Done is the tested fixes (Ziki #713); Open and In progress leave them out too.
+  const testedFor = (status: string) => testedByStatus.find((row) => row.status === status)?._count._all ?? 0;
+  const doneCount = READY_TO_MERGE_STATUSES.reduce((sum, status) => sum + testedFor(status), 0);
+  const workTabCount = (status: string) =>
+    countForStatus(status) - (status === "open" || status === "in_progress" ? testedFor(status) : 0);
+  const tabCount = (value: string) =>
+    value === ALL_STATUS ? allCount
+      : value === IDEAS_STATUS ? ideasCount
+      : value === DONE_STATUS ? doneCount
+        : value === "open" || value === "in_progress" ? workTabCount(value)
+        : value === READY_TO_MERGE_STATUS ? readyToMergeCount
+          : value === AUTO_MERGE_STATUS ? liveCount
+            : countForStatus(value);
   const allFilterCount = (value: string) =>
     value === ALL_STATUS ? allCount : value === REJECTED_STATUS ? rejectedCount : value === DUPLICATE_STATUS ? duplicateCount : value === READY_TO_MERGE_STATUS ? readyToMergeCount : countForStatus(value);
   // The Inbox's other lists, counted only while it is open.
   const liveTabWhere = { ...statusTabWhere, status: defaultStatusWhere(false) };
-  const [designCount, ideasCount, draftsCount] = inboxView && tenantId ? await Promise.all([
-    loadOrEmpty("design inbox", () => prisma.bug.count({ where: { ...liveTabWhere, redesigns: DESIGN_WHERE } }), 0),
-    loadOrEmpty(
-      "ideas inbox",
-      async () => [...(await openIssueStages(prisma, liveTabWhere)).values()].filter((stage) => stage === "reported").length,
-      0,
-    ),
-    loadOrEmpty(
-      "drafts inbox",
-      () => prisma.bug.count({ where: { ...liveTabWhere, createdByAgentId: null } }),
-      0,
-    ),
-  ]) : [0, 0, 0];
-  const inboxCounts: Record<InboxView, number> = { input: escalatedCount, design: designCount, ideas: ideasCount, drafts: draftsCount };
+  const designCount = inboxView && tenantId
+    ? await loadOrEmpty("design inbox", () => prisma.bug.count({ where: { ...liveTabWhere, redesigns: DESIGN_WHERE } }), 0)
+    : 0;
+  const inboxCounts: Record<InboxView, number> = { input: escalatedCount, design: designCount };
   // Your agents and what they've done, for the right half of the Inbox's top box.
   let inboxAgents: DashboardAgent[] = [];
   let inboxWork = new Map<string, AgentWorkDone>();
@@ -829,8 +942,8 @@ export default async function BugsPage({
     !selectedArea &&
     !stageView;
 
-  const page = (
-    <div className="issues-page mx-auto w-full max-w-6xl space-y-5">
+  const headerContent = (
+    <>
       {gettingStarted ? <GettingStarted {...gettingStarted} /> : null}
       {activeProject?.goal ? (
         <section aria-labelledby="project-goal-heading" className="rounded-[20px] border border-zk-border bg-zk-surface px-5 py-4">
@@ -866,7 +979,7 @@ export default async function BugsPage({
         </div>
         <Suspense fallback={<div className="h-8 w-36 rounded-lg bg-zk-chip" />}>
           <IssueFilters compact tagTypes={tagTypes} platforms={platforms} milestones={milestones} areas={areas} shortcutsEnabled={shortcutsEnabled}
-            stageCounts={isDeletedView ? undefined : { reported: reportedCount, confirmed: confirmedCount, ready: readyCount }}
+            stageCounts={isDeletedView ? undefined : { confirming: confirmingCount, ready: readyCount }}
             trailing={isFirstRun ? null : (
               <>
                 {/* Desktop: New issue is a + just left of the platform menu, which stays rightmost. */}
@@ -901,8 +1014,11 @@ export default async function BugsPage({
           {!isDeletedView ? <NewIssueButton className={isFirstRun ? "" : "md:hidden"} /> : null}
         </div>
       </div>
+    </>
+  );
 
-      <div className="space-y-4">
+  const listContent = (
+    <div className="space-y-4">
         {/* Inbox on the left (the escalated issues, formerly the Escalated tab);
             the status tabs sit at the right of the same row. */}
         <div className="issues-tabs-row flex items-center gap-2.5">
@@ -922,11 +1038,11 @@ export default async function BugsPage({
           {!isDeletedView ? (
             <nav aria-label="Issue status" className="issues-status-nav ml-auto min-w-0">
               <ul>
-                {[{ value: "open", label: "Open" }, { value: "in_progress", label: "In progress" }, { value: "resolved", label: "Done" }, { value: READY_TO_MERGE_STATUS, label: "Ready to Merge" }, { value: AUTO_MERGE_STATUS, label: "Live" }, { value: ALL_STATUS, label: "All" }].map(({ value, label }) => (
+                {STATUS_TABS.map(({ value, label }) => (
                   <li key={value}>
                     <Link href={statusHref(value)} aria-current={(value === ALL_STATUS ? allSelected : value === statusParam) ? "page" : undefined}>
                       <span className={`issues-status-dot issues-status-${value}`} aria-hidden="true" />
-                      {label}<span className="issues-status-count">{value === ALL_STATUS ? allCount : value === READY_TO_MERGE_STATUS ? readyToMergeCount : value === AUTO_MERGE_STATUS ? liveCount : countForStatus(value)}</span>
+                      {label}<span className="issues-status-count">{tabCount(value)}</span>
                     </Link>
                   </li>
                 ))}
@@ -963,6 +1079,7 @@ export default async function BugsPage({
                     return {
                       id: agent.id,
                       name: agent.name,
+                      avatar: agent.avatar,
                       status: agent.status,
                       activity: agent.activity,
                       done: done ? `Last 30 days: ${done}` : "Nothing done in the last 30 days",
@@ -1035,7 +1152,9 @@ export default async function BugsPage({
           </section>
         ) : null}
 
-        {isFirstRun ? (
+        {isIdeasView ? (
+          <IdeasList ideas={ideaRows} />
+        ) : isFirstRun ? (
           <FirstRunWelcome isAdmin={canDelete} hasTenant={Boolean(tenantId)} />
         ) : bugs.length === 0 ? (
           <div className="rounded-[20px] border border-zk-border bg-zk-surface px-4 py-12 text-center">
@@ -1053,11 +1172,7 @@ export default async function BugsPage({
                 ? "No agent is waiting on an answer."
                 : inboxView === "design"
                   ? "No redesign proposals are waiting for a decision."
-                  : inboxView === "ideas"
-                    ? "Newly reported issues show up here until they're confirmed."
-                    : inboxView === "drafts"
-                      ? "No unstructured draft ideas are waiting to be structured."
-                      : isWatchingView
+                  : isWatchingView
                 ? "You watch issues you report, are assigned to or comment on, and any you choose to watch from the issue page."
                 : emptyPlatform
                   ? "Issues tagged for this platform will show up here."
@@ -1103,7 +1218,7 @@ export default async function BugsPage({
                   {bugs.map((bug, index) => {
                     const userVote =
                       Array.isArray(bug.votes) && bug.votes.length > 0
-                        ? (bug.votes[0].value ?? 1)
+                        ? voteDirection(bug.votes[0].value ?? 1)
                         : 0;
                     const voterSummary =
                       voterSummaries.get(bug.id) ?? createEmptyVoterSummary();
@@ -1117,7 +1232,7 @@ export default async function BugsPage({
                       ? { person: claim?.beneficiary?.name ?? bug.assignee?.name ?? null, since: claim ? (claim.claimedAt ?? claim.createdAt) : null }
                       : null;
                     const rowStatus = (
-                      <IssueRowStatus status={bug.status} stage={stage} botConfirmations={botConfirmations.get(bug.id) ?? 0} votes={bug.voteCount} work={work}
+                      <IssueRowStatus status={bug.status} stage={stage} botConfirmations={botConfirmations.get(bug.id) ?? 0} work={work}
                         mergePath={bug.reviewStatus === "merged" ? mergePathOf(bug) : null} />
                     );
 
@@ -1259,21 +1374,25 @@ export default async function BugsPage({
           </section>
         )}
       </div>
-    </div>
   );
 
-  if (!canDelete || isDeletedView) return page;
-
   return (
-    <BulkSelectionProvider
-      key={selectionKey}
-      pageIds={bugIds}
-      types={bulkTypes}
-      platforms={bulkPlatforms}
-      users={bulkUsers}
-    >
-      {page}
-    </BulkSelectionProvider>
+    <div className="issues-page mx-auto w-full max-w-6xl space-y-5">
+      {headerContent}
+      {canDelete && !isDeletedView ? (
+        <BulkSelectionProvider
+          key={selectionKey}
+          pageIds={bugIds}
+          types={bulkTypes}
+          platforms={bulkPlatforms}
+          users={bulkUsers}
+        >
+          {listContent}
+        </BulkSelectionProvider>
+      ) : (
+        listContent
+      )}
+    </div>
   );
 }
 

@@ -15,7 +15,7 @@ import { GET as list } from "./route";
 import { GET as readOne } from "./[id]/route";
 
 const key = { id: "key-a", revokedAt: null, projectId: "project-web", project: { slug: "web" }, agent: {
-  id: "agent-a", name: "Agent A", ownerUserId: "owner-a", tenantId: "tenant-a", level: "contributor", burst: false, revokedAt: null,
+  id: "agent-a", name: "Agent A", ownerUserId: "owner-a", tenantId: "tenant-a", level: "working", burst: false, revokedAt: null,
   owner: { memberships: [{ tenantId: "tenant-a" }] },
 } };
 function request(path = "http://localhost/api/v1/projects", keyHeader = "Bearer ziki_test") {
@@ -43,19 +43,21 @@ describe("agent project discovery (#607)", () => {
     await expect(response.json()).resolves.toEqual({
       items: [
         { id: "project-web", slug: "web", name: "Web", goal: "Ship Ziki", repoUrl: "https://github.com/web", stagingUrl: "https://stage",
+          workUrl: expect.stringMatching(/\/web\/work$/),
           notesUrl: "/api/v1/projects/project-web/notes", notesCommentsUrl: "/api/v1/projects/project-web/notes/comments",
           workflow: {
             confirmationsNeeded: 2, verdictsNeeded: 2, offerWindowSeconds: 1800,
             heartbeatMinutes: 240, deliveryMinutes: 240, maxActiveClaims: 2,
-            volunteerWindowSeconds: 120, autoMerge: true,
+            volunteerWindowSeconds: 120, autoMerge: true, ideaThreshold: 3,
           }, openIssueCount: 3,
           rewardRules: { guidelines: null, reporter: 150, reviewer: 300, solver: { critical: 1800, high: 1200, low: 450, medium: 750 } } },
         { id: "project-api", slug: "api", name: "API", goal: null, repoUrl: null, stagingUrl: null,
+          workUrl: expect.stringMatching(/\/api\/work$/),
           notesUrl: "/api/v1/projects/project-api/notes", notesCommentsUrl: "/api/v1/projects/project-api/notes/comments",
           workflow: {
             confirmationsNeeded: 2, verdictsNeeded: 2, offerWindowSeconds: 1800,
             heartbeatMinutes: 240, deliveryMinutes: 240, maxActiveClaims: 2,
-            volunteerWindowSeconds: 120, autoMerge: true,
+            volunteerWindowSeconds: 120, autoMerge: true, ideaThreshold: 3,
           }, openIssueCount: 0,
           rewardRules: { guidelines: null, reporter: 150, reviewer: 300, solver: { critical: 1800, high: 1200, low: 450, medium: 750 } } },
       ],
@@ -106,7 +108,7 @@ describe("agent project discovery (#607)", () => {
       workflow: {
         confirmationsNeeded: 2, verdictsNeeded: 2, offerWindowSeconds: 1800,
         heartbeatMinutes: 240, deliveryMinutes: 240, maxActiveClaims: 2,
-        volunteerWindowSeconds: 120, autoMerge: true,
+        volunteerWindowSeconds: 120, autoMerge: true, ideaThreshold: 3,
       },
     });
     expect(db.project.findFirst).toHaveBeenCalledWith({ where: { id: "project-web", tenantId: "tenant-a" }, select: expect.objectContaining({ goal: true }) });

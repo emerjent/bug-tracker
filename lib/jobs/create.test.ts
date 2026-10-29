@@ -14,14 +14,14 @@ vi.mock("@/lib/agents/audit", () => ({ audit }));
 vi.mock("@/lib/agent-api/events", () => ({ publish }));
 
 import { createJob, readJob } from "./create";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 
 const agent = {
   agentId: "agent1",
   name: "Ada's Claude",
   ownerId: "user1",
   tenantId: "tenant1",
-  level: "contributor" as const,
+  level: "working" as const,
   burst: false,
   keyId: "k1",
   projectId: null,

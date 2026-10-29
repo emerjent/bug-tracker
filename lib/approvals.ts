@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 import { publish } from "@/lib/agent-api/events";
 import { isTenantAdminRole } from "@/lib/agents/membership";
 import { notifyLater } from "@/lib/notify";
@@ -404,13 +404,13 @@ export async function decideApproval(
           }
         }
       } else if (approval.stage === "before_merge") {
-        // Find the merger agent to resume merge
+        // Find the manager agent that accepted the fix, to resume the merge as it.
         const acceptedAudit = await tx.agentAuditEvent.findFirst({
           where: { bugId: approval.bugId, action: "issue.accepted" },
           include: { agent: true },
         });
         const merger = acceptedAudit?.agent ?? await tx.agent.findFirst({
-          where: { tenantId, level: "merger", revokedAt: null },
+          where: { tenantId, level: "manager", revokedAt: null },
         });
         if (merger) {
           const agentCtx: AgentContext = {
@@ -418,7 +418,8 @@ export async function decideApproval(
             name: merger.name,
             ownerId: merger.ownerUserId,
             tenantId: merger.tenantId,
-            level: "merger",
+            // Accept-level, as before: resuming doesn't make this an admin merge.
+            level: "manager",
             burst: false,
             keyId: "internal",
           };

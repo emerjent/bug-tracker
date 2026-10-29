@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { AgentContext } from "@/lib/agents/require-agent";
-import { IssueApiError } from "@/lib/agent-api/issues";
+import { IssueApiError } from "@/lib/agent-api/errors";
 import { publish } from "@/lib/agent-api/events";
 import {
   reviewerConflict,
@@ -96,7 +96,7 @@ async function findEligibleReviewerCandidates(
   bug: LoadedBug,
   excludeUserIds: Set<string> = new Set(),
 ): Promise<ReviewOfferCandidate[]> {
-  // Reviewers must be members of the tenant with an active agent having level 'reviewer' or 'merger'.
+  // Reviewers: members of the tenant with an active agent. Every agent class may review.
   const memberships = await db.membership.findMany({
     where: {
       tenantId,
@@ -105,7 +105,6 @@ async function findEligibleReviewerCandidates(
           some: {
             tenantId,
             revokedAt: null,
-            level: { in: ["reviewer", "dispatcher", "merger"] },
           },
         },
       },
@@ -118,7 +117,6 @@ async function findEligibleReviewerCandidates(
             where: {
               tenantId,
               revokedAt: null,
-              level: { in: ["reviewer", "dispatcher", "merger"] },
             },
             orderBy: { createdAt: "asc" },
             take: 1,
