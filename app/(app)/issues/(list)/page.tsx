@@ -461,11 +461,7 @@ export default async function BugsPage({
     }
     if (stageView) {
       const ids = [...stages.entries()]
-        .filter(([, stage]) =>
-          stageView === "ideas"
-            ? stage === "reported" || stage === "confirmed"
-            : stage === stageView,
-        )
+        .filter(([, stage]) => stage === stageView)
         .map(([id]) => id);
       where.id = { in: ids };
       try {
