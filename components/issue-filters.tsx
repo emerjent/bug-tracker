@@ -143,7 +143,8 @@ function IssuesSort({ value, onChange }: { value: ReturnType<typeof parseBugSort
  */
 const STAGE_PARAM = "stage";
 const STAGE_OPTIONS = [
-  { value: "reported", label: "Ideas" },
+  { value: "ideas", label: "Ideas" },
+  { value: "reported", label: "Ideas awaiting review" },
   { value: "confirmed", label: "Ideas awaiting upvotes" },
   { value: "ready", label: "Issues" },
 ] as const;
@@ -652,9 +653,18 @@ export function IssueFilters({
                     <label htmlFor="stage" className={fieldLabelClass}>Kind</label>
                     <FilterSelect compact={compact} aria-label="Kind" id="stage" className={selectClass} value={currentStage} onValueChange={(value) => update(STAGE_PARAM, value)}>
                       <option value="">Ideas and issues</option>
-                      {STAGE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>{stageCounts ? `${option.label} (${stageCounts[option.value]})` : option.label}</option>
-                      ))}
+                      {STAGE_OPTIONS.map((option) => {
+                        const count = stageCounts
+                          ? option.value === "ideas"
+                            ? (stageCounts.reported ?? 0) + (stageCounts.confirmed ?? 0)
+                            : stageCounts[option.value as keyof typeof stageCounts]
+                          : undefined;
+                        return (
+                          <option key={option.value} value={option.value}>
+                            {count !== undefined ? `${option.label} (${count})` : option.label}
+                          </option>
+                        );
+                      })}
                     </FilterSelect>
                   </div>
                   {!compact ? <div>

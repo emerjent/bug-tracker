@@ -9,6 +9,7 @@ import type { ReactElement } from "react";
 
 const count = vi.hoisted(() => vi.fn());
 const findMany = vi.hoisted(() => vi.fn());
+const openIssueStagesMock = vi.hoisted(() => vi.fn(async () => new Map<string, string>([["bug-1", "reported"]])));
 const groupBy = vi.hoisted(() => vi.fn(async (_args: { by: string[]; where?: Record<string, unknown> }) => {
   void _args;
   return [];
@@ -38,7 +39,7 @@ vi.mock("@/lib/tenant-context", async (importOriginal) => ({
 }));
 vi.mock("@/lib/issue-stage", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/issue-stage")>()),
-  openIssueStages: vi.fn(async () => new Map([["bug-1", "reported"]])),
+  openIssueStages: openIssueStagesMock,
 }));
 vi.mock("@/lib/voter-summaries", () => ({
   fetchVoterSummaries: vi.fn(async () =>
@@ -103,11 +104,28 @@ async function renderList(params: Record<string, string> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  openIssueStagesMock.mockResolvedValue(new Map([["bug-1", "reported"]]));
   count.mockResolvedValue(1);
   findMany.mockResolvedValue([BUG]);
 });
 
 describe("issue list layout", () => {
+  it("shows confirmed ideas when filtering by stage=ideas in a project with only confirmed ideas (#653)", async () => {
+    openIssueStagesMock.mockResolvedValue(new Map([["bug-1", "confirmed"]]));
+    findMany.mockResolvedValue([BUG]);
+    count.mockResolvedValue(1);
+
+    const html = await renderList({ stage: "ideas" });
+    expect(html).toContain("Login button does nothing");
+    expect(count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: { in: ["bug-1"] },
+        }),
+      }),
+    );
+  });
+
   it("renders Issues as the page title with a page-level New issue CTA", async () => {
     const html = await renderList();
     expect(html).toContain("Login button does nothing");

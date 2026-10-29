@@ -80,6 +80,7 @@ describe("intake", () => {
 
 describe("parseIssueStageView", () => {
   it("keeps the idea filters and the issue filter", () => {
+    expect(parseIssueStageView("ideas")).toBe("ideas");
     expect(parseIssueStageView("reported")).toBe("reported");
     expect(parseIssueStageView("confirmed")).toBe("confirmed");
     expect(parseIssueStageView("ready")).toBe("ready");

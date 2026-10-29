@@ -87,7 +87,7 @@ import { IssuesToolsToggle } from "@/components/issues-tools-toggle";
 import { LoadError } from "@/components/load-error";
 import { logLoadFailure } from "@/lib/load-error";
 import { AREA_PARAM, parseProjectAreaFilter, projectAreaFilterWhere } from "@/lib/project-area-filter";
-import { openIssueStages, parseIssueStageView, type IssueStage } from "@/lib/issue-stage";
+import { openIssueStages, parseIssueStageView, type IssueStage, type IssueStageView } from "@/lib/issue-stage";
 import { isUnstructuredDraft } from "@/lib/ideas";
 import { issuePath } from "@/lib/issue-ref";
 import { PROJECT_ALL_PARAM, showsAllProjects } from "@/lib/issue-list-filters";
@@ -412,7 +412,7 @@ export default async function BugsPage({
   }
 
   // New ideas and Drafted ideas in the Inbox are the issues still at the reported stage.
-  const stageView: IssueStage | null = isDeletedView
+  const stageView: IssueStageView | null = isDeletedView
     ? null
     : inboxView === "ideas" || inboxView === "drafts"
       ? "reported"
@@ -425,7 +425,13 @@ export default async function BugsPage({
       console.error("[bugs] issue stage lookup failed", error);
     }
     if (stageView) {
-      const ids = [...stages.entries()].filter(([, stage]) => stage === stageView).map(([id]) => id);
+      const ids = [...stages.entries()]
+        .filter(([, stage]) =>
+          stageView === "ideas"
+            ? stage === "reported" || stage === "confirmed"
+            : stage === stageView,
+        )
+        .map(([id]) => id);
       where.id = { in: ids };
       try {
         totalCount = await prisma.bug.count({ where });

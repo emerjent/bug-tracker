@@ -468,12 +468,33 @@ describe("IssueFilters stage filter (#1054)", () => {
     render(<IssueFilters stageCounts={{ reported: 7, confirmed: 2, ready: 4 }} />);
     fireEvent.click(screen.getByRole("button", { name: /^filter/i }));
     const stage = within(screen.getByRole("dialog", { name: "Filters" })).getByLabelText("Kind");
-    expect(within(stage).getByRole("option", { name: "Ideas (7)" })).toBeInTheDocument();
+    expect(within(stage).getByRole("option", { name: "Ideas (9)" })).toBeInTheDocument();
+    expect(within(stage).getByRole("option", { name: "Ideas awaiting review (7)" })).toBeInTheDocument();
     expect(within(stage).getByRole("option", { name: "Ideas awaiting upvotes (2)" })).toBeInTheDocument();
     expect(within(stage).getByRole("option", { name: "Issues (4)" })).toBeInTheDocument();
 
-    fireEvent.change(stage, { target: { value: "reported" } });
-    expect(nav.push).toHaveBeenCalledWith("/issues?stage=reported");
+    fireEvent.change(stage, { target: { value: "ideas" } });
+    expect(nav.push).toHaveBeenCalledWith("/issues?stage=ideas");
+  });
+
+  it("counts confirmed ideas under Ideas even if there are 0 reported ideas (#653)", () => {
+    render(<IssueFilters stageCounts={{ reported: 0, confirmed: 3, ready: 100 }} />);
+    fireEvent.click(screen.getByRole("button", { name: /^filter/i }));
+    const stage = within(screen.getByRole("dialog", { name: "Filters" })).getByLabelText("Kind");
+    expect(within(stage).getByRole("option", { name: "Ideas (3)" })).toBeInTheDocument();
+    expect(within(stage).getByRole("option", { name: "Ideas awaiting review (0)" })).toBeInTheDocument();
+    expect(within(stage).getByRole("option", { name: "Ideas awaiting upvotes (3)" })).toBeInTheDocument();
+    expect(within(stage).getByRole("option", { name: "Issues (100)" })).toBeInTheDocument();
+  });
+
+  it("keeps ?stage=ideas links working, counted and removable (#653)", () => {
+    nav.params = new URLSearchParams("stage=ideas&page=2");
+    render(<IssueFilters />);
+    expect(screen.getByRole("button", { name: /filter \(1 active\)/i })).toBeInTheDocument();
+    const remove = screen.getByRole("button", { name: "Remove stage filter" });
+    expect(remove.parentElement).toHaveTextContent("Kind: Ideas");
+    fireEvent.click(remove);
+    expect(nav.push).toHaveBeenCalledWith("/issues");
   });
 
   it("keeps old ?stage= links working, counted and removable", () => {
