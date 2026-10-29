@@ -1578,6 +1578,7 @@ model WebhookSubscription {
   agent                  Agent             @relation(fields: [agentId], references: [id], onDelete: Cascade)
   deliveries             WebhookDelivery[]
 
+  @@unique([agentId, url])
   @@index([agentId])
 }
 
