@@ -13,6 +13,7 @@ import type { OrganizationRole } from "@/lib/organization-role";
 import type { CommentType } from "@/lib/validations/issue";
 import { decisionStageInfo, stageOfComment, type DecisionStage, type StageStarts } from "@/lib/decision-stages";
 import { StageIcon, stageIconName } from "@/components/issue-progress-report";
+import { safeHref } from "@/lib/rich-text";
 
 const NO_STAGE_STARTS: StageStarts = { open: null, done: null, ready: null, live: null };
 import { deleteCommentAction, updateCommentAction } from "@/app/actions/comments";
@@ -73,6 +74,9 @@ function CommentTypeBadge({ type, metadata }: { type?: CommentType | null; metad
   const resolved: CommentType = type && type in commentTypeVisual ? type : "comment";
   const visual = commentTypeVisual[resolved];
   const meta = typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>) : null;
+  const rawPrUrl = typeof meta?.prUrl === "string" ? meta.prUrl : null;
+  const validatedPrUrl = rawPrUrl ? safeHref(rawPrUrl) : null;
+  const prHref = validatedPrUrl && (validatedPrUrl.startsWith("http://") || validatedPrUrl.startsWith("https://")) ? validatedPrUrl : null;
 
   return (
     <span
@@ -85,9 +89,9 @@ function CommentTypeBadge({ type, metadata }: { type?: CommentType | null; metad
       {resolved === "review" && typeof meta?.verdict === "string" ? (
         <span>· {meta.verdict}</span>
       ) : null}
-      {resolved === "delivery" && typeof meta?.prUrl === "string" ? (
+      {resolved === "delivery" && prHref ? (
         <a
-          href={meta.prUrl}
+          href={prHref}
           target="_blank"
           rel="noopener noreferrer"
           className="underline hover:opacity-80"

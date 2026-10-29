@@ -160,6 +160,55 @@ describe("CommentThread read-only mode (#122)", () => {
     expect(html).toContain("Delivery");
     expect(html).toContain('href="https://github.com/pr/1"');
   });
+
+  it("does not render javascript: or dangerous urls in delivery badges (#618)", () => {
+    const dangerousComments: CommentNode[] = [
+      {
+        id: "c-del-xss",
+        authorId: "u1",
+        parentId: null,
+        body: "Payload",
+        type: "delivery",
+        metadata: { prUrl: "javascript:alert(1)" },
+        createdAt: new Date("2026-10-16T12:00:00Z"),
+        editedAt: null,
+        deletedAt: null,
+        depth: 0,
+        author: { name: "Agent Attacker", role: "user" },
+        parent: null,
+        children: [],
+      },
+      {
+        id: "c-del-data",
+        authorId: "u1",
+        parentId: null,
+        body: "Data URI",
+        type: "delivery",
+        metadata: { prUrl: "data:text/html,<script>alert(1)</script>" },
+        createdAt: new Date("2026-10-16T12:00:00Z"),
+        editedAt: null,
+        deletedAt: null,
+        depth: 0,
+        author: { name: "Agent Attacker", role: "user" },
+        parent: null,
+        children: [],
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      createElement(CommentThread, {
+        bugId: "b1",
+        issueUrl: "https://issues.example/bugs/b1",
+        reporterId: "u1",
+        comments: dangerousComments,
+        users: [{ id: "u1", name: "Agent Attacker" }],
+      }),
+    );
+
+    expect(html).not.toContain('href="javascript:');
+    expect(html).not.toContain('href="data:');
+    expect(html).not.toContain(">PR</a>");
+  });
 });
 
 describe("CommentThread Admin label (#489)", () => {
