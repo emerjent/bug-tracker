@@ -2,8 +2,8 @@ import type { AgentLevel, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { audit } from "@/lib/agents/audit";
 import { generateApiKey, generateDeviceCode, generateUserCode, hashSecret, normalizeUserCode } from "@/lib/agents/keys";
-import { tenantForOwner } from "@/lib/agents/membership";
-import { DEFAULT_AGENT_LEVEL, SELF_REGISTRATION_LEVELS, normalizeAgentLevel } from "@/lib/agents/levels";
+import { isTenantAdmin, tenantForOwner } from "@/lib/agents/membership";
+import { DEFAULT_AGENT_LEVEL, SELF_REGISTRATION_LEVELS, canSetLevel, normalizeAgentLevel } from "@/lib/agents/levels";
 import { agentModelSchema, agentNameSchema, insertAgentWithKey, type Actor, type IssuedKey } from "@/lib/agents/registry";
 import { AGENT_LIMIT_MESSAGE, MAX_ACTIVE_AGENTS_PER_OWNER } from "@/lib/agents/registry-limits";
 import { logger } from "@/lib/logger";
@@ -151,6 +151,7 @@ export async function approvePairing(
   projectId = "",
   tenantId?: string | null,
   instructions?: unknown,
+  levelRaw?: unknown,
 ): Promise<ApprovePairingResult> {
   const code = normalizeUserCode(userCode);
   if (!code) return { ok: false, error: CODE_NOT_FOUND };
@@ -159,6 +160,17 @@ export async function approvePairing(
   if (!approvedInstructions.ok) return { ok: false, error: approvedInstructions.error };
   const tenant = await tenantForApproval(owner.id, tenantId);
   if (!tenant) return { ok: false, error: NO_TENANT };
+
+  let approvedLevel: AgentLevel | undefined;
+  if (levelRaw !== undefined && levelRaw !== null && levelRaw !== "") {
+    const normalized = normalizeAgentLevel(levelRaw);
+    if (!normalized) return { ok: false, error: "Invalid level." };
+    const admin = await isTenantAdmin(owner, tenant);
+    if (!canSetLevel({ isOwner: true, isTenantAdmin: admin }, normalized)) {
+      return { ok: false, error: "You do not have permission to grant this level." };
+    }
+    approvedLevel = normalized;
+  }
 
   // Checked before the pairing is claimed, so a bad project doesn't burn the code (#742).
   const project = projectId
@@ -192,6 +204,7 @@ export async function approvePairing(
       proposedName: pairing.proposedName,
       proposedModel: pairing.proposedModel,
       proposedLevel: pairing.proposedLevel,
+      approvedLevel,
       instructions: approvedInstructions.instructions,
       ownerUserId: owner.id,
       tenantId: tenant,
@@ -241,6 +254,7 @@ async function attachApprovedAgent(
     proposedName: string;
     proposedModel: string | null;
     proposedLevel: AgentLevel | null;
+    approvedLevel?: AgentLevel | null;
     /** The brief the owner approved (#431); never the agent's unreviewed proposal. */
     instructions?: string | null;
     ownerUserId: string;
@@ -249,13 +263,14 @@ async function attachApprovedAgent(
 ): Promise<string> {
   const requested = parseRequestedLevel(pairing.proposedLevel);
   if (!requested.ok) throw new Error(requested.error);
+  const finalLevel = pairing.approvedLevel ?? pairing.proposedLevel ?? DEFAULT_AGENT_LEVEL;
   const created = await tx.agent.create({
     data: {
       tenantId: pairing.tenantId,
       ownerUserId: pairing.ownerUserId,
       name: pairing.proposedName,
       model: pairing.proposedModel,
-      level: pairing.proposedLevel ?? DEFAULT_AGENT_LEVEL,
+      level: finalLevel,
       ...(pairing.instructions ? { instructions: pairing.instructions } : {}),
     },
     select: { id: true },
@@ -277,7 +292,8 @@ async function attachApprovedAgent(
     {
       name: pairing.proposedName,
       model: pairing.proposedModel,
-      level: pairing.proposedLevel ?? DEFAULT_AGENT_LEVEL,
+      level: finalLevel,
+      requestedLevel: pairing.proposedLevel ?? DEFAULT_AGENT_LEVEL,
       via: "pairing",
       instructionsLength: pairing.instructions?.length ?? 0,
     },

@@ -34,6 +34,7 @@ export function PairForm({
   projects,
   activeProjectId,
   instructionsMaxLength,
+  allowedLevels = ["working"],
 }: {
   initialCode: string;
   pending: { name: string; model: string | null; level: AgentLevel | null; instructions: string | null } | null;
@@ -41,6 +42,7 @@ export function PairForm({
   projects: AgentProjectChoice[];
   activeProjectId: string | null;
   instructionsMaxLength: number;
+  allowedLevels?: AgentLevel[];
 }) {
   const [code, setCode] = useState(() => formatPairingCode(initialCode));
   const [denied, setDenied] = useState(false);
@@ -136,6 +138,11 @@ export function PairForm({
       activeProjectId && projects.some((project) => project.id === activeProjectId)
         ? activeProjectId
         : projects[0]?.id;
+    const confirmLevels =
+      "allowedLevels" in confirm && Array.isArray(confirm.allowedLevels) && confirm.allowedLevels.length > 0
+        ? confirm.allowedLevels
+        : allowedLevels;
+    const defaultLevel = confirmLevels.includes(confirm.level) ? confirm.level : (confirmLevels[0] ?? "working");
     return (
       <form action={action} className={`mt-4 space-y-4 ${agentsSurface} p-4 sm:p-6`}>
         <input type="hidden" name="code" value={confirm.code} />
@@ -171,6 +178,23 @@ export function PairForm({
             {confirm.instructions
               ? "Suggested by the agent. Edit or clear it. The agent gets only what you approve here."
               : "A standing brief the agent reads from GET /api/v1/agents/me, such as focus areas. You can change it later in settings."}
+          </p>
+        </div>
+        <div className="space-y-1.5 sm:max-w-xs">
+          <label htmlFor="pair-level" className={agentsLabelClass}>
+            Level
+          </label>
+          <Select id="pair-level" name="level" defaultValue={defaultLevel} required className={agentsInputClass}>
+            {confirmLevels.map((lvl) => (
+              <option key={lvl} value={lvl}>
+                {AGENT_LEVEL_LABELS[lvl]}
+              </option>
+            ))}
+          </Select>
+          <p className="text-xs text-zk-muted">
+            {confirm.level !== defaultLevel
+              ? `Requested: ${AGENT_LEVEL_LABELS[confirm.level]}. You can approve at that level or lower.`
+              : "The authority class granted to this agent."}
           </p>
         </div>
         {projects.length === 0 ? (

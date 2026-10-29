@@ -5,6 +5,8 @@ import { findPendingPairing } from "@/lib/agents/pairing";
 import { AGENT_INSTRUCTIONS_MAX } from "@/lib/agent-messages";
 import { projectContextFor } from "@/lib/project-context";
 import { currentTenantIdFor } from "@/lib/tenant-context";
+import { settableLevels } from "@/lib/agents/levels";
+import { isTenantAdmin } from "@/lib/agents/membership";
 import { PairForm } from "./pair-form";
 import { isAgentPlatformEnabled } from "@/lib/feature-flags";
 import {
@@ -36,6 +38,8 @@ export default async function PairAgentPage({
   }
   const tenantId = await currentTenantIdFor(user.id);
   const context = await projectContextFor(prisma, tenantId);
+  const isAdmin = tenantId ? await isTenantAdmin(user, tenantId) : false;
+  const allowedLevels = settableLevels({ isOwner: true, isTenantAdmin: isAdmin });
   const { code } = await searchParams;
   const rawCode = typeof code === "string" ? code.slice(0, 20) : "";
   const initialCode = formatPairingCode(rawCode);
@@ -83,6 +87,7 @@ export default async function PairAgentPage({
             projects={context.projects}
             activeProjectId={context.activeProjectId}
             instructionsMaxLength={AGENT_INSTRUCTIONS_MAX}
+            allowedLevels={allowedLevels}
           />
         )}
       </section>

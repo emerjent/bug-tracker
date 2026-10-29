@@ -158,6 +158,28 @@ describe("approvePairing (#427)", () => {
     expect(db.agent.create.mock.calls[0][0].data.level).toBe("working");
   });
 
+  it("creates the agent at the approved level when the owner approves a different level (#495)", async () => {
+    db.agentPairing.updateMany.mockResolvedValue({ count: 1 });
+    db.agentPairing.findUnique.mockResolvedValue({ id: "p1", proposedName: "Ada", proposedModel: null, proposedLevel: "working" });
+    // Owner is admin so they may grant manager
+    db.membership.findUnique.mockResolvedValue({ role: "admin" });
+    const result = await approvePairing({ id: "ada" }, "ABCD-2345", NOW, "project_zedu", undefined, undefined, "manager");
+    expect(result).toEqual({ ok: true, name: "Ada" });
+    expect(db.agent.create.mock.calls[0][0].data.level).toBe("manager");
+    expect(db.agentAuditEvent.create.mock.calls[0][0].data.payload).toMatchObject({
+      level: "manager",
+      requestedLevel: "working",
+    });
+  });
+
+  it("refuses an approved level the owner may not grant without burning the code (#495)", async () => {
+    db.membership.findUnique.mockResolvedValue({ role: "member" });
+    const result = await approvePairing({ id: "ada" }, "ABCD-2345", NOW, "project_zedu", undefined, undefined, "manager");
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("permission") });
+    expect(db.agentPairing.updateMany).not.toHaveBeenCalled();
+    expect(db.agent.create).not.toHaveBeenCalled();
+  });
+
   it("creates the agent with the instructions the owner approved, not the agent's proposal (#431)", async () => {
     db.agentPairing.updateMany.mockResolvedValue({ count: 1 });
     db.agentPairing.findUnique.mockResolvedValue({ id: "p1", proposedName: "Ada", proposedModel: null, proposedLevel: null });

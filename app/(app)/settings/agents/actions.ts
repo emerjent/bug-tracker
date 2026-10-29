@@ -5,6 +5,8 @@ import { requireUser } from "@/lib/auth-helpers";
 import { isAgentLevel } from "@/lib/agents/levels";
 import type { AgentLevel } from "@prisma/client";
 import { consumePairingLimit } from "@/lib/agents/rate-limit";
+import { settableLevels } from "@/lib/agents/levels";
+import { isTenantAdmin } from "@/lib/agents/membership";
 import { approvePairing, findPendingPairing } from "@/lib/agents/pairing";
 import { currentTenantIdFor } from "@/lib/tenant-context";
 import { createAgent, deleteAgent, regenerateKey, revokeAgent, setAgentAreaPreferences, setAgentBurst, setAgentLevel } from "@/lib/agents/registry";
@@ -140,6 +142,7 @@ export type PairingActionResult =
       name: string;
       model: string | null;
       level: AgentLevel;
+      allowedLevels?: AgentLevel[];
       /** What the agent proposed (#431); the owner approves, edits or clears it. */
       instructions: string | null;
     }
@@ -159,14 +162,17 @@ export async function pairAgentAction(
   if (await consumePairingLimit("approve", user.id)) return { ok: false, error: RATE_LIMIT_MESSAGE };
 
   const code = String(formData.get("code") ?? "");
+  const tenantId = await currentTenantIdFor(user.id);
+
   if (formData.get("intent") === "approve") {
     const result = await approvePairing(
       user,
       code,
       new Date(),
       String(formData.get("projectId") ?? ""),
-      await currentTenantIdFor(user.id),
+      tenantId,
       formData.get("instructions") ?? undefined,
+      formData.get("level") ?? undefined,
     );
     if (!result.ok) return result;
     revalidatePath("/agents");
@@ -177,6 +183,9 @@ export async function pairAgentAction(
   if (!pending) {
     return { ok: false, error: "That code doesn't match a waiting agent. It may have expired; ask the agent for a new one." };
   }
+  const isAdmin = tenantId ? await isTenantAdmin(user, tenantId) : false;
+  const allowedLevels = settableLevels({ isOwner: true, isTenantAdmin: isAdmin });
+
   return {
     ok: true,
     step: "confirm",
@@ -184,6 +193,7 @@ export async function pairAgentAction(
     name: pending.proposedName,
     model: pending.proposedModel,
     level: pending.proposedLevel ?? "working",
+    allowedLevels,
     instructions: pending.proposedInstructions,
   };
 }
