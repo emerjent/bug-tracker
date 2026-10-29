@@ -992,8 +992,10 @@ export default async function BugsPage({
             <nav aria-label="Issue status" className="issues-status-nav min-w-0">
               <ul>
                 <li>
-                  <Link href={statusHref(null)} aria-current={isEscalatedView ? "page" : undefined} aria-label="Inbox" title="Inbox">
+                  <Link href={statusHref(null)} aria-current={isEscalatedView ? "page" : undefined} title="Inbox" data-testid="inbox-tab">
                     <span className="issues-status-dot issues-status-inbox" aria-hidden="true" />
+                    {/* Named in text, not aria-label, so the count stays part of its name (axe). */}
+                    <span className="sr-only">Inbox</span>
                     <span className={`issues-status-count ${escalatedCount > 0 ? "issues-inbox-waiting" : ""}`}>{escalatedCount}</span>
                   </Link>
                 </li>

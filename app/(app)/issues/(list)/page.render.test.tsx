@@ -373,7 +373,7 @@ describe("issue list layout", () => {
     expect(nav).not.toContain("ml-auto");
     const labels = [...nav.matchAll(/<\/span>([A-Za-z ]+)<span class="issues-status-count">/g)].map((m) => m[1]);
     expect(labels).toEqual(["Requires confirmation", "Open", "In progress", "Done", "Ready to Merge", "Live", "All"]);
-    const inbox = nav.match(/<a [^>]*aria-label="Inbox"[\s\S]*?<\/a>/)?.[0] ?? "";
+    const inbox = nav.match(/<a [^>]*data-testid="inbox-tab"[\s\S]*?<\/a>/)?.[0] ?? "";
     expect(inbox).toMatch(/href="\/issues"/);
     expect(inbox).toContain('aria-current="page"');
     expect(inbox).toContain("issues-status-inbox");
@@ -444,7 +444,7 @@ describe("issue list layout", () => {
 
   it("leaves Inbox unselected on the other tabs", async () => {
     const html = await renderList({ status: "open" });
-    const inbox = html.match(/<a [^>]*aria-label="Inbox"[\s\S]*?<\/a>/)?.[0] ?? "";
+    const inbox = html.match(/<a [^>]*data-testid="inbox-tab"[\s\S]*?<\/a>/)?.[0] ?? "";
     expect(inbox).toContain('title="Inbox"');
     expect(inbox).not.toContain('aria-current="page"');
   });
