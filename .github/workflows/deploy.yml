@@ -75,7 +75,8 @@ jobs:
         run: |
           set -uo pipefail
           if [[ -z "${COOLIFY_WEBHOOK_URL:-}" ]]; then
-            echo "Coolify webhook URL secret is not set for ${{ github.event.workflow_run.head_branch }}"; exit 1
+            echo "::notice title=Coolify Deploy Skipped::Coolify webhook URL secret is not set for ${{ github.event.workflow_run.head_branch }}. Skipping Coolify deployment."
+            exit 0
           fi
           # Safe to log: scheme, host and path only (no query string, no token)
           echo "Calling: ${COOLIFY_WEBHOOK_URL%%\?*}"
