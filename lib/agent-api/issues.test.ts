@@ -897,4 +897,43 @@ describe("issue read confirmation", () => {
     await list(request());
     expect(db.bug.findMany.mock.calls.at(-1)?.[0]?.select.voteCount).toBe(true);
   });
+
+  describe("assignee display object (#491)", () => {
+    it("selects assignee { id, name } and assigneeId in list select", async () => {
+      await list(request());
+      const select = db.bug.findMany.mock.calls.at(-1)?.[0]?.select;
+      expect(select.assignee).toEqual({ select: { id: true, name: true } });
+      expect(select.assigneeId).toBe(true);
+    });
+
+    it("returns assignee object when an issue is assigned", async () => {
+      db.bug.findFirst.mockResolvedValue({
+        ...issue,
+        assigneeId: "user-123",
+        assignee: { id: "user-123", name: "Jane Contributor" },
+        status: "in_progress",
+        voteCount: 0,
+      });
+      const res = await read(request(), context);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.issue.assigneeId).toBe("user-123");
+      expect(body.issue.assignee).toEqual({ id: "user-123", name: "Jane Contributor" });
+    });
+
+    it("returns null assignee when an issue is unassigned", async () => {
+      db.bug.findFirst.mockResolvedValue({
+        ...issue,
+        assigneeId: null,
+        assignee: null,
+        status: "open",
+        voteCount: 0,
+      });
+      const res = await read(request(), context);
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.issue.assigneeId).toBeNull();
+      expect(body.issue.assignee).toBeNull();
+    });
+  });
 });
