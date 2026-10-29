@@ -18,7 +18,7 @@ import { workflowFor } from "@/lib/workflow";
  * is written to the database.
  *
  * The merge is attempted only when all of the gates hold: #434 accepted the
- * fix, the issue links a pull request that belongs to `Project.repoUrl`, the
+ * fix, the issue links a pull request in one of the project's repositories, the
  * pull request's checks are green, and the app can merge that repo. On failure
  * the tracker acceptance is left untouched, a `github.merge_failed` event is
  * published, and the claim's person is notified.
@@ -72,6 +72,49 @@ export function parsePullRequestUrl(url: string | null | undefined): PullRequest
 /** True when two refs name the same repository (GitHub is case-insensitive). */
 export function sameRepo(a: RepoRef, b: RepoRef): boolean {
   return a.owner.toLowerCase() === b.owner.toLowerCase() && a.repo.toLowerCase() === b.repo.toLowerCase();
+}
+
+/** What a project says about its repositories (#2): the main one and any others. */
+export type ProjectRepositories = {
+  repoUrl: string | null;
+  githubInstallationId: string | null;
+  repositories?: { url: string; githubInstallationId: string | null }[] | null;
+} | null | undefined;
+
+export type ProjectRepositoryMatch = { repo: RepoRef; installationId: string | null };
+
+/** The project fields `findProjectRepository` reads, for a Prisma `select`. */
+export const projectRepositoriesSelect = {
+  repoUrl: true,
+  githubInstallationId: true,
+  repositories: { select: { url: true, githubInstallationId: true } },
+} as const;
+
+/**
+ * The project's repositories, main one first. Another repository uses its own
+ * GitHub App installation, or the project's when it has none (same organization).
+ */
+export function projectRepositoryList(project: ProjectRepositories): ProjectRepositoryMatch[] {
+  if (!project) return [];
+  const list: ProjectRepositoryMatch[] = [];
+  const main = parseGitHubRepoUrl(project.repoUrl);
+  if (main) list.push({ repo: main, installationId: project.githubInstallationId });
+  for (const extra of project.repositories ?? []) {
+    const repo = parseGitHubRepoUrl(extra.url);
+    if (repo) list.push({ repo, installationId: extra.githubInstallationId ?? project.githubInstallationId });
+  }
+  return list;
+}
+
+/** The project repository `ref` belongs to, or null when it isn't one of them. */
+export function findProjectRepository(project: ProjectRepositories, ref: RepoRef | null): ProjectRepositoryMatch | null {
+  if (!ref) return null;
+  return projectRepositoryList(project).find((entry) => sameRepo(entry.repo, ref)) ?? null;
+}
+
+/** The installation for a pull request: its repository's, else the project's. */
+export function installationForPullRequest(project: ProjectRepositories, pullRequestUrl: string | null | undefined): string | null {
+  return findProjectRepository(project, parsePullRequestUrl(pullRequestUrl))?.installationId ?? project?.githubInstallationId ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -450,7 +493,7 @@ const mergeBugSelect = {
   projectId: true,
   pullRequestUrl: true,
   assigneeId: true,
-  project: { select: { repoUrl: true, githubInstallationId: true } },
+  project: { select: projectRepositoriesSelect },
   claims: {
     where: { status: "active", releasedAt: null },
     select: { beneficiaryUserId: true },
@@ -465,7 +508,7 @@ type LoadedBug = {
   projectId: string;
   pullRequestUrl: string | null;
   assigneeId: string | null;
-  project: { repoUrl: string | null; githubInstallationId: string | null } | null;
+  project: ProjectRepositories;
   claims: { beneficiaryUserId: string }[];
 };
 
@@ -595,15 +638,15 @@ export async function mergeAcceptedFix(
     );
   }
 
-  // Gate 2: the issue links a pull request that belongs to the project's repo.
+  // Gate 2: the issue links a pull request in one of the project's repos (#2).
   const ref = parsePullRequestUrl(bug.pullRequestUrl);
   if (!ref) return fail(409, "no_pull_request", "No pull request is linked to this issue.");
-  const repo = parseGitHubRepoUrl(bug.project?.repoUrl);
-  if (!repo || !sameRepo(ref, repo)) {
+  const match = findProjectRepository(bug.project, ref);
+  if (!match) {
     return fail(422, "repo_mismatch", "That pull request is not in this project's repository.");
   }
 
-  const client = deps.client ?? clientForInstallation(bug.project?.githubInstallationId, deps.env);
+  const client = deps.client ?? clientForInstallation(match.installationId, deps.env);
   let prFiles = deps.files ?? [];
   if (!prFiles.length && client?.getPullRequestFiles) {
     try {

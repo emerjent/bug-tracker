@@ -6,6 +6,7 @@ import { isTenantAdmin } from "@/lib/agents/membership";
 import { prisma } from "@/lib/prisma";
 import { ProjectSettingsForm } from "./settings-form";
 import { ProjectAreasManager } from "./areas-manager";
+import { ProjectRepositoriesManager } from "./repositories-manager";
 import { ProjectApprovalRulesSection } from "./approval-rules";
 import { WorkflowSettingsForm } from "./workflow-settings-form";
 import { workflowValues } from "@/lib/workflow-config";
@@ -33,6 +34,10 @@ export default async function ProjectSettingsPage({
     select: {
       id: true, slug: true, name: true, goal: true, repoUrl: true, stagingUrl: true,
       githubInstallationId: true, rewardConfig: true, workflow: true,
+      repositories: {
+        select: { id: true, url: true, label: true, branch: true, githubInstallationId: true },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      },
     },
   });
   if (!project) notFound();
@@ -79,7 +84,7 @@ export default async function ProjectSettingsPage({
         <ProjectSettingsForm project={project} defaults={platformDefaults} />
         <div className="border-t border-zk-border pt-5">
           <h2 className="text-base font-semibold text-zk-text">GitHub App</h2>
-          <p className="mt-1 text-sm text-zk-text2">Installation ID: {project.githubInstallationId ?? "Not connected"}. No access token is stored.</p>
+          <p className="mt-1 text-sm text-zk-text2">For the main repository, and the others in the same organization. Installation ID: {project.githubInstallationId ?? "Not connected"}. No access token is stored.</p>
           <div className="mt-3">
             <a
               href={`/projects/${encodeURIComponent(project.slug)}/settings/github`}
@@ -89,6 +94,11 @@ export default async function ProjectSettingsPage({
             </a>
           </div>
         </div>
+        <ProjectRepositoriesManager
+          projectSlug={project.slug}
+          repositories={project.repositories}
+          projectConnected={Boolean(project.githubInstallationId)}
+        />
       </section>
       <section className="space-y-5 rounded-[20px] border border-zk-border bg-zk-surface p-4 sm:p-6" aria-labelledby="workflow-heading">
         <div>

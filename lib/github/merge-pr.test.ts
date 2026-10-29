@@ -18,9 +18,12 @@ vi.mock("@/lib/agent-notifications", () => ({ notifyMergeFailed: notify.notifyMe
 import {
   createAppJwt,
   createInstallationClient,
+  findProjectRepository,
+  installationForPullRequest,
   mergeAcceptedFix,
   parseGitHubRepoUrl,
   parsePullRequestUrl,
+  projectRepositoryList,
   sameRepo,
   type GitHubClient,
 } from "./merge-pr";
@@ -773,5 +776,85 @@ describe("unresolvedCodeRabbitThreads against the GitHub API", () => {
     stubFetch((url) => tokenRoute(url) ?? jsonResponse({}, false));
 
     await expect(createInstallationClient("123", env).unresolvedCodeRabbitThreads(ref)).rejects.toThrow();
+  });
+});
+
+describe("a project's other repositories (#2)", () => {
+  const project = {
+    repoUrl: "https://github.com/zedu/web",
+    githubInstallationId: "111",
+    repositories: [
+      { url: "https://github.com/zedu/api", githubInstallationId: null },
+      { url: "https://github.com/partner/mobile", githubInstallationId: "777" },
+    ],
+  };
+
+  beforeEach(() => {
+    // The approval test above attaches a pending before-merge rule to the shared db mock.
+    for (const model of ["approvalRule", "issueApproval", "membership"]) delete (db as Record<string, unknown>)[model];
+  });
+
+  it("lists the main repository first, then the others with their installations", () => {
+    expect(projectRepositoryList(project)).toEqual([
+      { repo: { owner: "zedu", repo: "web" }, installationId: "111" },
+      { repo: { owner: "zedu", repo: "api" }, installationId: "111" },
+      { repo: { owner: "partner", repo: "mobile" }, installationId: "777" },
+    ]);
+    expect(projectRepositoryList(null)).toEqual([]);
+    expect(projectRepositoryList({ repoUrl: null, githubInstallationId: null })).toEqual([]);
+  });
+
+  it("finds the repository a pull request is in, ignoring case, and nothing for others", () => {
+    expect(findProjectRepository(project, { owner: "Zedu", repo: "API" })).toEqual({
+      repo: { owner: "zedu", repo: "api" },
+      installationId: "111",
+    });
+    expect(findProjectRepository(project, { owner: "someone", repo: "fork" })).toBeNull();
+    expect(findProjectRepository(project, null)).toBeNull();
+  });
+
+  it("uses the pull request's repository installation, else the project's", () => {
+    expect(installationForPullRequest(project, "https://github.com/partner/mobile/pull/3")).toBe("777");
+    expect(installationForPullRequest(project, "https://github.com/zedu/api/pull/9")).toBe("111");
+    expect(installationForPullRequest(project, "https://github.com/someone/fork/pull/1")).toBe("111");
+    expect(installationForPullRequest(project, null)).toBe("111");
+  });
+
+  it("merges an accepted pull request in another of the project's repositories", async () => {
+    db.bug.findFirst.mockResolvedValue(bugRow({ pullRequestUrl: "https://github.com/zedu/api/pull/9", project }));
+    const client = fakeClient();
+
+    const result = await mergeAcceptedFix(agent, "bug1", { client });
+
+    expect(result).toMatchObject({ status: 200, merged: true });
+    expect(client.mergePullRequest).toHaveBeenCalledWith({ owner: "zedu", repo: "api", number: 9 }, "head-sha");
+  });
+
+  it("still rejects a pull request in a repository the project doesn't list", async () => {
+    db.bug.findFirst.mockResolvedValue(bugRow({ pullRequestUrl: "https://github.com/someone/fork/pull/9", project }));
+    const client = fakeClient();
+
+    const result = await mergeAcceptedFix(agent, "bug1", { client });
+
+    expect(result).toMatchObject({ status: 422, reason: "repo_mismatch" });
+    expect(client.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("merges through the installation of the repository the pull request is in", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: "test",
+      GITHUB_APP_ID: "123456",
+      GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs1", format: "pem" }).toString(),
+    };
+    const fetchMock = stubFetch((url) => tokenRoute(url) ?? jsonResponse({}, false));
+    db.bug.findFirst.mockResolvedValue(bugRow({ pullRequestUrl: "https://github.com/partner/mobile/pull/3", project }));
+
+    await mergeAcceptedFix(agent, "bug1", { env });
+
+    const tokenCalls = fetchMock.mock.calls.map(([url]) => String(url)).filter((url) => url.endsWith("/access_tokens"));
+    expect(tokenCalls.length).toBeGreaterThan(0);
+    expect(tokenCalls.every((url) => url.includes("/app/installations/777/"))).toBe(true);
+    vi.unstubAllGlobals();
   });
 });

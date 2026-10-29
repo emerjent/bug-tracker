@@ -1,7 +1,13 @@
 import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { linkPullRequest } from "@/lib/github/link-pr";
-import { parseGitHubRepoUrl, parsePullRequestUrl, sameRepo } from "@/lib/github/merge-pr";
+import {
+  findProjectRepository,
+  parseGitHubRepoUrl,
+  parsePullRequestUrl,
+  projectRepositoriesSelect,
+  sameRepo,
+} from "@/lib/github/merge-pr";
 
 /**
  * Auto-link a pull request that names an issue (#474 follow-up).
@@ -41,7 +47,7 @@ export type OpenedPullRequest = {
   pullRequestUrl: string;
   /** `pull_request.head.sha`. */
   headSha: string | null;
-  /** `repository.html_url` — identifies the project via `Project.repoUrl`. */
+  /** `repository.html_url` — identifies the project by any of its repositories (#2). */
   repositoryUrl: string;
   /** Text scanned for issue references: title, body, head branch name. */
   text: string[];
@@ -60,14 +66,13 @@ export async function linkIssuesForOpenedPullRequest(
   if (!repo || !prRepo || !sameRepo(repo, prRepo)) return [];
 
   const projects = await db.project.findMany({
-    where: { repoUrl: { not: null } },
-    select: { id: true, tenantId: true, slug: true, repoUrl: true },
+    where: { OR: [{ repoUrl: { not: null } }, { repositories: { some: {} } }] },
+    select: { id: true, tenantId: true, slug: true, ...projectRepositoriesSelect },
   });
   const linked: string[] = [];
 
   for (const project of projects) {
-    const projectRepo = parseGitHubRepoUrl(project.repoUrl);
-    if (!projectRepo || !sameRepo(projectRepo, repo)) continue;
+    if (!findProjectRepository(project, repo)) continue;
 
     const numbers = new Set<number>();
     for (const text of pr.text) {

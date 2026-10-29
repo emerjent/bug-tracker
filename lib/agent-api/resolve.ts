@@ -6,9 +6,10 @@ import { statusChangedSummary, unboostedSummary } from "@/lib/activity-log";
 import { AGENT_RESOLVE_VIA } from "@/lib/agent-resolution";
 import {
   clientForInstallation,
-  parseGitHubRepoUrl,
+  findProjectRepository,
   parsePullRequestUrl,
-  sameRepo,
+  projectRepositoriesSelect,
+  projectRepositoryList,
   type GitHubClient,
 } from "@/lib/github/merge-pr";
 
@@ -45,7 +46,7 @@ export async function resolveMergedFix(
     where: { id: bugId, ...scope, isDeleted: false },
     select: {
       id: true, status: true, assigneeId: true, reporterId: true, pullRequestUrl: true, isBoosted: true,
-      project: { select: { repoUrl: true, githubInstallationId: true } },
+      project: { select: projectRepositoriesSelect },
       claims: {
         where: { status: "active", releasedAt: null },
         select: { id: true, agentId: true, beneficiaryUserId: true },
@@ -71,11 +72,13 @@ export async function resolveMergedFix(
     return fail(409, "pr_mismatch", "This issue is linked to a different pull request. Resolve it with that one.");
   }
 
-  const repo = parseGitHubRepoUrl(bug.project?.repoUrl);
-  if (!repo) return fail(422, "no_repo", "This project has no GitHub repository set, so the merge can't be checked.");
-  if (!sameRepo(ref, repo)) return fail(422, "wrong_repo", "That pull request is not in this project's repository.");
+  if (projectRepositoryList(bug.project).length === 0) {
+    return fail(422, "no_repo", "This project has no GitHub repository set, so the merge can't be checked.");
+  }
+  const match = findProjectRepository(bug.project, ref);
+  if (!match) return fail(422, "wrong_repo", "That pull request is not in this project's repository.");
 
-  const client = clientFor(bug.project?.githubInstallationId);
+  const client = clientFor(match.installationId);
   if (!client) return fail(409, "github_unavailable", "Ziki can't read pull requests for this project: its GitHub App isn't installed.");
   const pullRequest = await client.getPullRequest(ref).catch(() => null);
   if (!pullRequest) return fail(502, "github_error", "GitHub didn't answer. Try again in a minute.");

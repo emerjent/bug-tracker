@@ -667,8 +667,31 @@ model Project {
   notes                ProjectNotes?
   noteRevisions        ProjectNoteRevision[]
   noteComments         ProjectNoteComment[]
+  repositories         ProjectRepository[]
 
   @@unique([tenantId, slug])
+}
+
+/// More GitHub repositories for a project (#2), e.g. its API next to its web app.
+/// `Project.repoUrl` stays the main repository; these are the others. A pull
+/// request in any of them can be linked, accepted, merged and resolved.
+model ProjectRepository {
+  id                   String   @id @default(cuid())
+  projectId            String
+  /// `https://github.com/owner/repo`, lower-cased so a repository is listed once.
+  url                  String
+  /// Short name shown to people and agents, e.g. "API" or "Mobile".
+  label                String?
+  /// The branch fixes go into, when it isn't the repository's default.
+  branch               String?
+  /// GitHub App installation for this repository when it differs from the
+  /// project's (another organization). Never a token.
+  githubInstallationId String?
+  createdAt            DateTime @default(now())
+  project              Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, url])
+  @@index([projectId])
 }
 
 /// The per-project workflow dials (#595). One row per project; a missing row

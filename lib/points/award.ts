@@ -2,7 +2,7 @@ import type { Prisma, PrismaClient, Severity } from "@prisma/client";
 import { pointSourceKey, roundPoints, solverPoints, type PointRole } from "./rules";
 import { calculateSolverPoints, type ProjectRewardConfig } from "./project-rewards";
 import { getPlatformRewardConfig, getProjectRewardConfig } from "./platform-rewards";
-import { isPullRequestClosedUnmerged } from "@/lib/github/merge-pr";
+import { installationForPullRequest, isPullRequestClosedUnmerged, projectRepositoriesSelect } from "@/lib/github/merge-pr";
 
 /**
  * Writes points to the ledger (#428). The backfill (#435), the merge gate
@@ -99,14 +99,14 @@ export async function awardSolver(db: Db, issue: ResolvedIssue): Promise<boolean
         select: {
           projectId: true,
           pullRequestUrl: true,
-          project: { select: { githubInstallationId: true } },
+          project: { select: projectRepositoriesSelect },
         },
       });
       if (!projectId) projectId = bug?.projectId;
       if (!issue.pullRequestUrl && bug?.pullRequestUrl) {
         const isClosed = await isPullRequestClosedUnmerged(
           bug.pullRequestUrl,
-          bug.project?.githubInstallationId,
+          installationForPullRequest(bug.project, bug.pullRequestUrl),
         );
         if (isClosed) return false;
       }

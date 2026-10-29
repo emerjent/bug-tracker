@@ -52,6 +52,19 @@ describe("linkIssuesForOpenedPullRequest", () => {
     }));
   });
 
+  it("finds the project by another of its repositories (#2)", async () => {
+    linkPullRequest.mockClear();
+    const db = dbWith([{ id: "bug-2", pullRequestUrl: null, claims: [{ agentId: "a1", beneficiaryUserId: "u1" }] }]);
+    db.project.findMany.mockResolvedValue([
+      { id: "p1", tenantId: "t1", slug: "ziki", repoUrl: "https://github.com/o/web", repositories: [{ url: "https://github.com/o/r" }] },
+    ]);
+    expect(await linkIssuesForOpenedPullRequest(PR, db as never)).toEqual(["bug-2"]);
+    expect(db.project.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: { OR: [{ repoUrl: { not: null } }, { repositories: { some: {} } }] },
+    }));
+    expect(db.bug.findMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ projectId: "p1" }) }));
+  });
+
   it("only refreshes the head SHA when the same pull request is already linked", async () => {
     linkPullRequest.mockClear();
     const db = dbWith([{ id: "bug-1", pullRequestUrl: PR.pullRequestUrl, claims: [{ agentId: "a1", beneficiaryUserId: "u1" }] }]);

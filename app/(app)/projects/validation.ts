@@ -21,15 +21,37 @@ const optionalUrl = (check: (url: URL) => boolean, message: string) =>
     }, message),
   );
 
+const isGitHubRepoUrl = (url: URL) =>
+  url.protocol === "https:" && url.hostname === "github.com" && !url.port && !url.username && !url.password &&
+  /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?\/?$/.test(url.pathname) && !url.search && !url.hash;
+const GITHUB_REPO_URL_MESSAGE = "Enter a GitHub repository URL, such as https://github.com/owner/repository.";
+
 export const projectSettingsSchema = z.object({
   name: z.string().trim().min(PROJECT_NAME_MIN, `Project name must be at least ${PROJECT_NAME_MIN} characters.`).max(PROJECT_NAME_MAX, `Project name must be ${PROJECT_NAME_MAX} characters or fewer.`),
   goal: z.string().trim().max(4000, "The project goal must be 4,000 characters or fewer.").transform((value) => value || null),
-  repoUrl: optionalUrl((url) =>
-    url.protocol === "https:" && url.hostname === "github.com" && !url.port && !url.username && !url.password &&
-    /^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?\/?$/.test(url.pathname) && !url.search && !url.hash,
-  "Enter a GitHub repository URL, such as https://github.com/owner/repository."),
+  repoUrl: optionalUrl(isGitHubRepoUrl, GITHUB_REPO_URL_MESSAGE),
   stagingUrl: optionalUrl((url) => url.protocol === "https:",
     "Enter a valid HTTPS staging URL."),
+});
+
+/** How many repositories a project can list besides its main one (#2). */
+export const PROJECT_EXTRA_REPOSITORIES_MAX = 10;
+
+/** `https://github.com/owner/repo`, lower-cased: GitHub names are case-insensitive. */
+export function canonicalGitHubRepoUrl(value: string): string {
+  const [owner, repo] = new URL(value).pathname.replace(/\/$/, "").replace(/\.git$/i, "").split("/").filter(Boolean);
+  return `https://github.com/${owner}/${repo}`.toLowerCase();
+}
+
+/** Another repository for a project (#2): its URL, a short label and its target branch. */
+export const projectRepositorySchema = z.object({
+  url: z.string().trim().refine((value) => {
+    try { return isGitHubRepoUrl(new URL(value)); } catch { return false; }
+  }, GITHUB_REPO_URL_MESSAGE).transform(canonicalGitHubRepoUrl),
+  label: z.string().trim().max(40, "The label must be 40 characters or fewer.").transform((value) => value || null),
+  branch: z.string().trim().max(100, "The branch must be 100 characters or fewer.")
+    .refine((value) => value === "" || /^(?!\/|.*\.\.|.*\/$)[A-Za-z0-9._/-]+$/.test(value), "Enter a branch name, such as dev or main.")
+    .transform((value) => value || null),
 });
 
 const areaPathPattern = z.string().trim().min(1).max(256).refine(

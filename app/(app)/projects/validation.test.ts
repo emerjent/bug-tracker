@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  canonicalGitHubRepoUrl,
   nextProjectSlug,
   projectAreaSchema,
+  projectRepositorySchema,
   PROJECT_SLUG_MAX,
   projectNameSchema,
   projectSettingsSchema,
@@ -92,5 +94,29 @@ describe("nextProjectSlug (#426)", () => {
     const slug = nextProjectSlug(base, new Set([base]));
     expect(slug.length).toBeLessThanOrEqual(PROJECT_SLUG_MAX);
     expect(slug.endsWith("-2")).toBe(true);
+  });
+});
+
+describe("projectRepositorySchema (#2)", () => {
+  it("stores one canonical, lower-case URL per repository", () => {
+    expect(projectRepositorySchema.parse({ url: " https://github.com/Acme/API.git/ ", label: " API ", branch: "release/v2" }))
+      .toEqual({ url: "https://github.com/acme/api", label: "API", branch: "release/v2" });
+    expect(canonicalGitHubRepoUrl("https://github.com/Acme/Web")).toBe("https://github.com/acme/web");
+  });
+
+  it("turns an empty label or branch into nothing", () => {
+    expect(projectRepositorySchema.parse({ url: "https://github.com/acme/api", label: "", branch: "" }))
+      .toMatchObject({ label: null, branch: null });
+  });
+
+  it.each([
+    ["another host", { url: "https://gitlab.com/acme/api" }],
+    ["plain http", { url: "http://github.com/acme/api" }],
+    ["an owner without a repository", { url: "https://github.com/acme" }],
+    ["a long label", { label: "x".repeat(41) }],
+    ["a branch with ..", { branch: "a/../b" }],
+    ["a branch with spaces", { branch: "my branch" }],
+  ])("rejects %s", (_name, overrides) => {
+    expect(projectRepositorySchema.safeParse({ url: "https://github.com/acme/api", label: "", branch: "", ...overrides }).success).toBe(false);
   });
 });

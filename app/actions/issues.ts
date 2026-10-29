@@ -98,7 +98,7 @@ import {
 import { publish } from "@/lib/agent-api/events";
 import { issueChangePayload, publishWebEvent } from "@/lib/agent-api/web-events";
 import { firstPullRequestLink, pullRequestAttachment } from "@/lib/github/pr-mention";
-import { isPullRequestClosedUnmerged, standingAcceptance } from "@/lib/github/merge-pr";
+import { installationForPullRequest, isPullRequestClosedUnmerged, projectRepositoriesSelect, standingAcceptance } from "@/lib/github/merge-pr";
 import {
   agentMentionNames,
   agentOwnerIds,
@@ -448,7 +448,7 @@ export async function updateBugAction(
       area: { select: { id: true, name: true } },
       type: { select: { id: true, name: true } },
       milestone: { select: { id: true, title: true } },
-      project: { select: { githubInstallationId: true } },
+      project: { select: projectRepositoriesSelect },
     },
   });
   if (!existing || existing.isDeleted) {
@@ -572,7 +572,7 @@ export async function updateBugAction(
   ) {
     const isClosed = await isPullRequestClosedUnmerged(
       existing.pullRequestUrl,
-      existing.project?.githubInstallationId,
+      installationForPullRequest(existing.project, existing.pullRequestUrl),
     );
     if (isClosed) {
       return { error: "The linked pull request is closed without being merged." };

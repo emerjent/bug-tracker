@@ -20,10 +20,12 @@ import { workflowFor } from "@/lib/workflow";
 import {
   clientForInstallation,
   codeRabbitThreadsMessage,
+  findProjectRepository,
+  installationForPullRequest,
   isPullRequestClosedUnmerged,
-  parseGitHubRepoUrl,
   parsePullRequestUrl,
-  sameRepo,
+  projectRepositoriesSelect,
+  projectRepositoryList,
   type GitHubClient,
   type MergePullResult,
   type PullRequest,
@@ -60,7 +62,7 @@ const mergeBugSelect = {
   reporterId: true,
   createdByAgentId: true,
   createdByAgent: { select: { ownerUserId: true } },
-  project: { select: { repoUrl: true, githubInstallationId: true } },
+  project: { select: projectRepositoriesSelect },
   claims: {
     select: {
       status: true,
@@ -251,9 +253,9 @@ export async function acceptFix(
     };
   }
 
+  // #2: any of the project's repositories; a project with none set accepts any.
   const ref = parsePullRequestUrl(bug.pullRequestUrl);
-  const repo = parseGitHubRepoUrl(bug.project?.repoUrl);
-  if (ref && repo && !sameRepo(ref, repo)) {
+  if (ref && projectRepositoryList(bug.project).length > 0 && !findProjectRepository(bug.project, ref)) {
     return {
       status: 409,
       error: "not_ready",
@@ -265,7 +267,7 @@ export async function acceptFix(
   // #642: a pull request closed without being merged cannot be accepted.
   const isClosed = await isPullRequestClosedUnmerged(
     bug.pullRequestUrl,
-    bug.project?.githubInstallationId,
+    installationForPullRequest(bug.project, bug.pullRequestUrl),
     deps.client,
   );
   if (isClosed) {
@@ -423,7 +425,7 @@ export async function acceptFix(
   const hasAppConfig = Boolean(process.env.GITHUB_APP_ID && process.env.GITHUB_APP_PRIVATE_KEY);
   const ghClient = deps.client !== undefined
     ? deps.client
-    : (hasAppConfig ? clientForInstallation(bug.project?.githubInstallationId) : null);
+    : (hasAppConfig ? clientForInstallation(installationForPullRequest(bug.project, bug.pullRequestUrl)) : null);
 
   // Every way the merge can stop records a merge status and a comment, so the
   // issue says exactly where it is. None of them resolves it or pays points.

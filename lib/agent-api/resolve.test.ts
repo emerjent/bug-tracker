@@ -131,6 +131,20 @@ describe("resolveMergedFix (Ziki #515)", () => {
     expect(db.$transaction).not.toHaveBeenCalled();
   });
 
+  it("resolves a merged fix in another of the project's repositories, through its installation (#2)", async () => {
+    const other = "https://github.com/acme/api/pull/5";
+    db.bug.findFirst.mockResolvedValue(bug({ project: {
+      repoUrl: "https://github.com/acme/app",
+      githubInstallationId: "inst",
+      repositories: [{ url: "https://github.com/acme/api", githubInstallationId: "api-inst" }],
+    } }));
+    const gh = github();
+    const clientFor = vi.fn(() => gh.client);
+    const result = await resolveMergedFix(agent(), scope, "bug1", other, clientFor);
+    expect(result).toMatchObject({ status: 200, body: { resolved: true, pullRequestUrl: other } });
+    expect(clientFor).toHaveBeenCalledWith("api-inst");
+  });
+
   it("refuses when the project's GitHub App isn't installed", async () => {
     db.bug.findFirst.mockResolvedValue(bug());
     expect(await resolveMergedFix(agent(), scope, "bug1", PR, () => null)).toMatchObject({ status: 409, body: { error: "github_unavailable" } });

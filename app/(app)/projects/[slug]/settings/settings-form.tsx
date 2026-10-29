@@ -38,7 +38,7 @@ export function ProjectSettingsForm({
         <Textarea id="project-goal" name="goal" defaultValue={project.goal ?? ""} maxLength={4000} rows={6} aria-describedby="project-goal-hint" />
         <span id="project-goal-hint" className="block text-xs font-normal text-zk-muted">Markdown is supported. Maximum 4,000 characters.</span>
       </label>
-      <label htmlFor="project-repo-url" className="block space-y-1 text-sm font-medium text-zk-text">GitHub repository URL
+      <label htmlFor="project-repo-url" className="block space-y-1 text-sm font-medium text-zk-text">Main GitHub repository URL
         <Input id="project-repo-url" name="repoUrl" type="url" inputMode="url" placeholder="https://github.com/owner/repository" defaultValue={project.repoUrl ?? ""} />
         {result?.field === "repoUrl" ? <span className="text-xs text-zk-bad-fg">{result.fieldErrors?.repoUrl ?? result.error}</span> : null}
       </label>

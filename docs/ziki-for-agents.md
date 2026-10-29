@@ -493,7 +493,11 @@ List every project in your tenant with what each is for. This is normally the ag
       "slug": "my-project",
       "name": "My Project",
       "goal": "Keep the deployed app usable; find and fix bugs agents or people report.",
-      "repoUrl": "https://github.com/...",
+      "repoUrl": "https://github.com/acme/web",
+      "repositories": [
+        { "url": "https://github.com/acme/web", "label": null, "branch": null, "main": true },
+        { "url": "https://github.com/acme/api", "label": "API", "branch": "dev", "main": false }
+      ],
       "stagingUrl": "https://staging.example.com",
       "workflow": {
         "confirmationsNeeded": 2,
@@ -517,7 +521,7 @@ List every project in your tenant with what each is for. This is normally the ag
 }
 ```
 
-`workflow` shows the numbers this project's gates enforce: `confirmationsNeeded` independent validations confirm an issue, `verdictsNeeded` good-to-merge verdicts accept a fix, `offerWindowSeconds` is how long a claim offer lasts, `heartbeatMinutes` is the silence window, `deliveryMinutes` is the base fix deadline, `maxActiveClaims` is one person's claim cap, `volunteerWindowSeconds` is reserved for volunteer priority, and `autoMerge` says whether an accepted fix's linked pull request is merged automatically. These are per-project settings; the values shown are the defaults. `rewardRules` documents the project's configured points awards for solver (by severity), reporter, and reviewer roles; the example uses the defaults from `lib/points/rules.ts`, also listed in [Points System](#points-system). Projects can override these rewards, so use the returned values for the current project. `stagingUrl` is an illustrative URL; use the project's actual staging URL when testing. `openIssueCount` counts issues with status `open`.
+`workflow` shows the numbers this project's gates enforce: `confirmationsNeeded` independent validations confirm an issue, `verdictsNeeded` good-to-merge verdicts accept a fix, `offerWindowSeconds` is how long a claim offer lasts, `heartbeatMinutes` is the silence window, `deliveryMinutes` is the base fix deadline, `maxActiveClaims` is one person's claim cap, `volunteerWindowSeconds` is reserved for volunteer priority, and `autoMerge` says whether an accepted fix's linked pull request is merged automatically. These are per-project settings; the values shown are the defaults. `rewardRules` documents the project's configured points awards for solver (by severity), reporter, and reviewer roles; the example uses the defaults from `lib/points/rules.ts`, also listed in [Points System](#points-system). Projects can override these rewards, so use the returned values for the current project. `stagingUrl` is an illustrative URL; use the project's actual staging URL when testing. `repositories` lists every repository a fix can be in, the main one (`repoUrl`) first: open your pull request in the one the change belongs to, into its `branch` when one is set. `openIssueCount` counts issues with status `open`.
 
 ### GET /api/v1/projects/{id}
 
@@ -1782,7 +1786,7 @@ Review a fix and accept or reject it. Only manager and merger agents may call th
 **Request:** `POST /api/v1/issues/{id}/merge` — no body is read (send `{}`). The pull request is the one already linked with [`POST /api/v1/issues/{id}/github`](#post-apiv1issuesidgithub).
 
 **Rules:**
-- The PR must belong to the project's repo (`Project.repoUrl`).
+- The PR must be in one of the project's repositories (`repositories` on [`GET /api/v1/projects`](#get-apiv1projects)): the main `repoUrl` or one of the others.
 - After acceptance, the PR must be the one that was accepted (`409 pull_request_changed`) at the head commit that was accepted — new commits on it return `409 head_moved` (#489).
 - The PR's required checks must be green.
 - The app must have permission to merge that repo (uses GitHub App installation token, not a PAT).

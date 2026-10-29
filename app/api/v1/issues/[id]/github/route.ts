@@ -7,10 +7,11 @@ import { linkPullRequest } from "@/lib/github/link-pr";
 import { parseIssueRef } from "@/lib/issue-ref";
 import {
   clientForInstallation,
+  findProjectRepository,
   mergeAcceptedFix,
-  parseGitHubRepoUrl,
   parsePullRequestUrl,
-  sameRepo,
+  projectRepositoriesSelect,
+  projectRepositoryList,
   standingAcceptance,
 } from "@/lib/github/merge-pr";
 
@@ -67,7 +68,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
         id: true,
         projectId: true,
         pullRequestUrl: true,
-        project: { select: { repoUrl: true, githubInstallationId: true } },
+        project: { select: projectRepositoriesSelect },
       },
     });
     if (!bug) return NextResponse.json({ error: "No such issue." }, { status: 404 });
@@ -93,8 +94,9 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
       }
     }
 
-    const repo = parseGitHubRepoUrl(bug.project?.repoUrl);
-    if (repo && !sameRepo(ref, repo)) {
+    // #2: a pull request in any of the project's repositories can be linked.
+    const match = findProjectRepository(bug.project, ref);
+    if (projectRepositoryList(bug.project).length > 0 && !match) {
       return NextResponse.json(
         { error: "That pull request is not in this project's repository." },
         { status: 422 },
@@ -118,7 +120,7 @@ export async function POST(request: NextRequest, context: { params: Promise<{ id
     // #489: record the head commit with the link, so the acceptance and the
     // merge gate bind to the exact code, not just a pull request number.
     let pullRequestHeadSha: string | null = null;
-    const client = clientForInstallation(bug.project?.githubInstallationId);
+    const client = clientForInstallation(match?.installationId ?? bug.project?.githubInstallationId);
     if (client) {
       pullRequestHeadSha = await client
         .getPullRequest(ref)

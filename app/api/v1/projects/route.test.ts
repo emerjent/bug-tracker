@@ -34,7 +34,8 @@ beforeEach(() => {
 describe("agent project discovery (#607)", () => {
   it("lists the tenant's projects with goal, workflow gates and open counts", async () => {
     db.project.findMany.mockResolvedValue([
-      { id: "project-web", slug: "web", name: "Web", goal: "Ship Ziki", repoUrl: "https://github.com/web", stagingUrl: "https://stage" },
+      { id: "project-web", slug: "web", name: "Web", goal: "Ship Ziki", repoUrl: "https://github.com/web", stagingUrl: "https://stage",
+        repositories: [{ url: "https://github.com/acme/api", label: "API", branch: "dev" }] },
       { id: "project-api", slug: "api", name: "API", goal: null, repoUrl: null, stagingUrl: null },
     ]);
     db.bug.groupBy.mockResolvedValue([{ projectId: "project-web", _count: { _all: 3 } }]);
@@ -45,13 +46,17 @@ describe("agent project discovery (#607)", () => {
         { id: "project-web", slug: "web", name: "Web", goal: "Ship Ziki", repoUrl: "https://github.com/web", stagingUrl: "https://stage",
           workUrl: expect.stringMatching(/\/web\/work$/),
           notesUrl: "/api/v1/projects/project-web/notes", notesCommentsUrl: "/api/v1/projects/project-web/notes/comments",
+          repositories: [
+            { url: "https://github.com/web", label: null, branch: null, main: true },
+            { url: "https://github.com/acme/api", label: "API", branch: "dev", main: false },
+          ],
           workflow: {
             confirmationsNeeded: 2, verdictsNeeded: 2, offerWindowSeconds: 1800,
             heartbeatMinutes: 240, deliveryMinutes: 240, maxActiveClaims: 2,
             volunteerWindowSeconds: 120, autoMerge: true,
           }, openIssueCount: 3,
           rewardRules: { guidelines: null, reporter: 150, reviewer: 300, solver: { critical: 1800, high: 1200, low: 450, medium: 750 } } },
-        { id: "project-api", slug: "api", name: "API", goal: null, repoUrl: null, stagingUrl: null,
+        { id: "project-api", slug: "api", name: "API", goal: null, repoUrl: null, stagingUrl: null, repositories: [],
           workUrl: expect.stringMatching(/\/api\/work$/),
           notesUrl: "/api/v1/projects/project-api/notes", notesCommentsUrl: "/api/v1/projects/project-api/notes/comments",
           workflow: {

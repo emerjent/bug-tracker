@@ -7,6 +7,8 @@ const isTenantAdmin = vi.hoisted(() => vi.fn());
 const cookieGet = vi.hoisted(() => vi.fn());
 const cookieDelete = vi.hoisted(() => vi.fn());
 const projectFindFirst = vi.hoisted(() => vi.fn());
+const repositoryFindFirst = vi.hoisted(() => vi.fn());
+const repositoryUpdate = vi.hoisted(() => vi.fn());
 const transaction = vi.hoisted(() => vi.fn());
 const update = vi.hoisted(() => vi.fn());
 const audit = vi.hoisted(() => vi.fn());
@@ -18,6 +20,7 @@ vi.mock("@/lib/agents/membership", () => ({ isTenantAdmin }));
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     project: { findFirst: projectFindFirst },
+    projectRepository: { findFirst: repositoryFindFirst },
     $transaction: transaction,
   },
 }));
@@ -37,7 +40,7 @@ beforeEach(() => {
   cookieGet.mockReturnValue({ value: "web.random-state" });
   projectFindFirst.mockResolvedValue({ id: "project-1", githubInstallationId: null });
   transaction.mockImplementation((work: (tx: unknown) => Promise<unknown>) =>
-    work({ project: { update }, projectAuditEvent: { create: audit } }),
+    work({ project: { update }, projectRepository: { update: repositoryUpdate }, projectAuditEvent: { create: audit } }),
   );
 });
 
@@ -61,6 +64,34 @@ describe("GitHub App project callback (#608)", () => {
     expect(projectFindFirst).toHaveBeenCalledWith({ where: { tenantId: "tenant-1", slug: "web" }, select: { id: true, githubInstallationId: true } });
     expect(update).toHaveBeenCalledWith({ where: { id: "project-1" }, data: { githubInstallationId: "12345" } });
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ actorUserId: "user-1", action: "github.installation.connected" }) }));
+  });
+
+  it("saves the installation on one of the project's other repositories when the state names it (#2)", async () => {
+    cookieGet.mockReturnValue({ value: "web.repo-cmrepo0000000001.random-state" });
+    repositoryFindFirst.mockResolvedValue({ id: "cmrepo0000000001", url: "https://github.com/partner/api", githubInstallationId: null });
+    const response = await GET(callback("installation_id=777&state=web.repo-cmrepo0000000001.random-state&setup_action=install"));
+    expect(response.headers.get("location")).toContain("/projects/web/settings?github=connected");
+    expect(repositoryFindFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "cmrepo0000000001", projectId: "project-1" } }));
+    expect(repositoryUpdate).toHaveBeenCalledWith({ where: { id: "cmrepo0000000001" }, data: { githubInstallationId: "777" } });
+    expect(update).not.toHaveBeenCalled();
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ action: "github.installation.connected" }) }));
+  });
+
+  it("reads the repository from the returned state when the cookie is gone (#2)", async () => {
+    cookieGet.mockReturnValue(undefined);
+    repositoryFindFirst.mockResolvedValue({ id: "cmrepo0000000001", url: "https://github.com/partner/api", githubInstallationId: null });
+    const response = await GET(callback("installation_id=777&state=web.repo-cmrepo0000000001.random-state&setup_action=install"));
+    expect(response.headers.get("location")).toContain("/projects/web/settings?github=connected");
+    expect(repositoryUpdate).toHaveBeenCalledWith({ where: { id: "cmrepo0000000001" }, data: { githubInstallationId: "777" } });
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("writes nothing when the named repository isn't the project's (#2)", async () => {
+    cookieGet.mockReturnValue({ value: "web.repo-cmrepo0000000009.random-state" });
+    repositoryFindFirst.mockResolvedValue(null);
+    const response = await GET(callback("installation_id=777&state=web.repo-cmrepo0000000009.random-state&setup_action=install"));
+    expect(response.headers.get("location")).toContain("github=error");
+    expect(transaction).not.toHaveBeenCalled();
   });
 
   it("does not connect an installation for a workspace member", async () => {

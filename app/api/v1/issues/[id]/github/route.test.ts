@@ -245,6 +245,25 @@ describe("POST /api/v1/issues/[id]/github (#452)", () => {
     expect(db.bug.update).not.toHaveBeenCalled();
   });
 
+  it("links a pull request in another of the project's repositories, through that repository's installation (#2)", async () => {
+    db.bug.findFirst.mockResolvedValue({
+      id: "bug1",
+      projectId: "proj-1",
+      pullRequestUrl: null,
+      project: {
+        repoUrl: "https://github.com/zedu/web",
+        githubInstallationId: "111",
+        repositories: [{ url: "https://github.com/partner/api", githubInstallationId: "777" }],
+      },
+    });
+    const response = await POST(request({ pullRequestUrl: "https://github.com/partner/api/pull/4" }), params);
+    expect(response.status).toBe(200);
+    expect(mocks.clientForInstallation).toHaveBeenCalledWith("777");
+    expect(db.bug.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ pullRequestUrl: "https://github.com/partner/api/pull/4" }),
+    }));
+  });
+
   it("refuses to swap in a different pull request after the fix was accepted (#489)", async () => {
     db.bug.findFirst.mockResolvedValue({
       id: "bug1",
