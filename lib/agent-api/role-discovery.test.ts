@@ -19,7 +19,7 @@ vi.mock("@/lib/agent-api/validation", () => ({
 }));
 
 import { findReadyToMergeIssues } from "./merger";
-import { findReviewableIssues } from "./reviewer";
+import { findReviewableIssues, SCAN_BATCH } from "./reviewer";
 import { findTriageableIssues } from "./triager";
 import { findClaimableIssues } from "./contributor";
 import { AgentLevelError } from "@/lib/agents/levels";
@@ -28,6 +28,21 @@ const contributor = { agentId: "c1", name: "c1", ownerId: "co", tenantId: "tenan
 const triager = { agentId: "t1", name: "t1", ownerId: "to", tenantId: "tenant", level: "working" as const, burst: false, keyId: "k" };
 const reviewer = { agentId: "r1", name: "r1", ownerId: "ro", tenantId: "tenant", level: "working" as const, burst: false, keyId: "k" };
 const merger = { agentId: "m1", name: "m1", ownerId: "mo", tenantId: "tenant", level: "manager" as const, burst: false, keyId: "k" };
+
+/** A converted issue row as the confirmation queues select it. */
+const row = (id: string) => ({
+  id,
+  number: 1,
+  title: id,
+  projectId: "p1",
+  reporterId: "user-1",
+  beneficiaryUserId: "user-1",
+  createdByAgentId: null,
+  createdByAgent: null,
+  createdAt: new Date(),
+  claims: [],
+});
+const oldConfirmed = (n: number) => Array.from({ length: n }, (_, i) => row(`old-${i}`));
 
 describe("Role-based discovery functions", () => {
   beforeEach(() => {
@@ -190,6 +205,41 @@ describe("Role-based discovery functions", () => {
       const issues = await findTriageableIssues(triager, "p1");
       expect(issues).toHaveLength(1);
       expect(issues[0].id).toBe("bug-3");
+    });
+
+    it("keeps reading past a full batch of confirmed issues (#714)", async () => {
+      const { isConfirmed } = await import("@/lib/agent-api/validation");
+      (isConfirmed as unknown as { mockImplementation: (fn: (id: string) => Promise<boolean>) => void }).mockImplementation(async (id) => id !== "new");
+      db.bug.findMany
+        .mockResolvedValueOnce(oldConfirmed(SCAN_BATCH))
+        .mockResolvedValueOnce([row("new")]);
+
+      const issues = await findTriageableIssues(triager, "p1", 25);
+
+      expect(issues.map((issue) => issue.id)).toEqual(["new"]);
+      expect(db.bug.findMany).toHaveBeenCalledTimes(2);
+      expect(db.bug.findMany.mock.calls[1][0]).toMatchObject({ skip: 1, cursor: { id: `old-${SCAN_BATCH - 1}` } });
+    });
+  });
+
+  describe("findReviewableIssues paging (#714)", () => {
+    it("finds a newly converted issue behind a full batch of confirmed ones", async () => {
+      const { isConfirmed } = await import("@/lib/agent-api/validation");
+      (isConfirmed as unknown as { mockImplementation: (fn: (id: string) => Promise<boolean>) => void }).mockImplementation(async (id) => id !== "new");
+      db.bug.findMany
+        .mockResolvedValueOnce(oldConfirmed(SCAN_BATCH))
+        .mockResolvedValueOnce([row("new")]);
+
+      const issues = await findReviewableIssues(reviewer, "p1", "validation", 25);
+
+      expect(issues.map((issue) => issue.id)).toEqual(["new"]);
+      expect(issues[0]).toMatchObject({ stage: "confirming", reviewType: "validation" });
+    });
+
+    it("stops at the end of the table", async () => {
+      db.bug.findMany.mockResolvedValueOnce(oldConfirmed(3));
+      await expect(findReviewableIssues(reviewer, "p1", "validation", 25)).resolves.toEqual([]);
+      expect(db.bug.findMany).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -16,6 +16,9 @@ export type ReviewableIssue = {
   createdAt: Date;
 };
 
+/** Rows read per query while looking for unconfirmed issues (#714). */
+export const SCAN_BATCH = 100;
+
 /**
  * Scan for issues ready for reviewer validation or PR testing.
  */
@@ -29,69 +32,79 @@ export async function findReviewableIssues(
 
   const results: ReviewableIssue[] = [];
 
-  // 1. Validation candidates: unconfirmed issues needing confirmation
+  // 1. Validation candidates: unconfirmed issues needing confirmation. Most
+  // converted issues are already confirmed, so read in batches until `limit`
+  // unconfirmed ones are found: taking only the oldest `limit` rows and then
+  // dropping the confirmed ones returned nothing once enough old issues were
+  // confirmed (#714).
   if (reviewType === "validation" || reviewType === "all") {
-    const unconfirmedBugs = await prisma.bug.findMany({
-      where: {
-        tenantId: agent.tenantId,
-        projectId,
-        isDeleted: false,
-        status: "open",
-        // Only issues are confirmed; ideas take verdicts (#idea-verdicts).
-        convertedToIssueAt: { not: null },
-        validations: {
-          none: {
-            agentId: agent.agentId,
+    let cursor: string | undefined;
+    for (;;) {
+      const unconfirmedBugs = await prisma.bug.findMany({
+        where: {
+          tenantId: agent.tenantId,
+          projectId,
+          isDeleted: false,
+          status: "open",
+          // Only issues are confirmed; ideas take verdicts (#idea-verdicts).
+          convertedToIssueAt: { not: null },
+          validations: {
+            none: {
+              agentId: agent.agentId,
+            },
           },
         },
-      },
-      take: limit,
-      orderBy: { createdAt: "asc" },
-      select: {
-        id: true,
-        number: true,
-        title: true,
-        projectId: true,
-        reporterId: true,
-        beneficiaryUserId: true,
-        createdByAgentId: true,
-        createdByAgent: { select: { ownerUserId: true } },
-        createdAt: true,
-        claims: {
-          where: { status: "active", releasedAt: null },
-          select: { agentId: true, beneficiaryUserId: true, agent: { select: { ownerUserId: true } } },
+        take: SCAN_BATCH,
+        ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          number: true,
+          title: true,
+          projectId: true,
+          reporterId: true,
+          beneficiaryUserId: true,
+          createdByAgentId: true,
+          createdByAgent: { select: { ownerUserId: true } },
+          createdAt: true,
+          claims: {
+            where: { status: "active", releasedAt: null },
+            select: { agentId: true, beneficiaryUserId: true, agent: { select: { ownerUserId: true } } },
+          },
         },
-      },
-    });
-
-    for (const bug of unconfirmedBugs) {
-      if (results.length >= limit) break;
-      if (await isConfirmed(bug.id)) continue;
-
-      const reviewed = {
-        reporterId: bug.reporterId,
-        beneficiaryUserId: bug.beneficiaryUserId,
-        createdByAgentId: bug.createdByAgentId,
-        createdByAgent: bug.createdByAgent,
-        claims: bug.claims.map((c) => ({
-          status: "active" as const,
-          releasedAt: null,
-          agentId: c.agentId,
-          beneficiaryUserId: c.beneficiaryUserId,
-          agent: c.agent,
-        })),
-      };
-      if (reviewerConflict({ id: agent.agentId, ownerUserId: agent.ownerId }, reviewed)) continue;
-
-      results.push({
-        id: bug.id,
-        number: bug.number,
-        title: bug.title,
-        projectId: bug.projectId,
-        stage: "confirming",
-        reviewType: "validation",
-        createdAt: bug.createdAt,
       });
+
+      for (const bug of unconfirmedBugs) {
+        if (results.length >= limit) break;
+        if (await isConfirmed(bug.id)) continue;
+
+        const reviewed = {
+          reporterId: bug.reporterId,
+          beneficiaryUserId: bug.beneficiaryUserId,
+          createdByAgentId: bug.createdByAgentId,
+          createdByAgent: bug.createdByAgent,
+          claims: bug.claims.map((c) => ({
+            status: "active" as const,
+            releasedAt: null,
+            agentId: c.agentId,
+            beneficiaryUserId: c.beneficiaryUserId,
+            agent: c.agent,
+          })),
+        };
+        if (reviewerConflict({ id: agent.agentId, ownerUserId: agent.ownerId }, reviewed)) continue;
+
+        results.push({
+          id: bug.id,
+          number: bug.number,
+          title: bug.title,
+          projectId: bug.projectId,
+          stage: "confirming",
+          reviewType: "validation",
+          createdAt: bug.createdAt,
+        });
+      }
+      if (results.length >= limit || unconfirmedBugs.length < SCAN_BATCH) break;
+      cursor = unconfirmedBugs[unconfirmedBugs.length - 1].id;
     }
   }
 
