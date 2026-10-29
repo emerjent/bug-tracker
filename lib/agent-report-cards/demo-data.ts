@@ -1,5 +1,3 @@
-"use client";
-
 /**
  * Demo data for Agent Report Cards.
  * Clearly labelled as demo data — never presented as real activity.
@@ -192,7 +190,7 @@ export const DEMO_AGENT_REPORTS: DemoAgentReport[] = [
   },
   {
     id: "demo-4",
-    name: "OpenCode Reviewer",
+    name: "OpenCode Contributor",
     role: "contributor",
     secondaryId: "contributor-2",
     events: [
