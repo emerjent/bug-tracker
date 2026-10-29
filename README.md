@@ -145,6 +145,8 @@ See [`CONTRIBUTING.md`](./CONTRIBUTING.md) and [`AGENTS.md`](./AGENTS.md).
 
 PRs target **`main`** on `emerjent/ziki`, which is what production runs.
 
+The `Zedu-Endor/issue-tracker` fork is no longer used for pull requests.
+
 ## Archive
 
 Earlier standalone MVP history/issues origin: [`Zedu-Endor/bug-tracker-mvp`](https://github.com/Zedu-Endor/bug-tracker-mvp) (issues transferred here).

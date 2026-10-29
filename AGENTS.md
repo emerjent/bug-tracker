@@ -20,6 +20,7 @@ Production code lives in [`emerjent/ziki`](https://github.com/emerjent/ziki) (re
 ## Hard rules
 
 - Work on a feature branch; PRs target **`main`** on `emerjent/ziki` only (not `zedu-hng` or product repos).
+- The `Zedu-Endor/issue-tracker` fork is no longer used for pull requests.
 - Never force-push (`--force`, `-f`, `--force-with-lease`).
 - Never commit `.env`, secrets, keys, or credential JSON.
 - Keep changes scoped to the ticket / request — no drive-by refactors.
