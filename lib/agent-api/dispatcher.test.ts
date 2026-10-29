@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentLevelError } from "@/lib/agents/levels";
 
-const db = vi.hoisted(() => ({
-  bug: { findMany: vi.fn(), update: vi.fn(), count: vi.fn() },
-  issueBid: { findMany: vi.fn(), count: vi.fn() },
-  issueClaim: { update: vi.fn(), count: vi.fn() },
-}));
+const db = vi.hoisted(() => {
+  const mock = {
+    bug: { findMany: vi.fn(), update: vi.fn(), count: vi.fn() },
+    issueBid: { findMany: vi.fn(), count: vi.fn() },
+    issueClaim: { update: vi.fn(), count: vi.fn(), findUnique: vi.fn() },
+    bugActivity: { createMany: vi.fn() },
+    $queryRaw: vi.fn(),
+    $transaction: vi.fn(),
+  };
+  mock.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(mock));
+  return mock;
+});
 const isConfirmed = vi.hoisted(() => vi.fn());
 const offerNext = vi.hoisted(() => vi.fn());
 const scheduleOfferExpiry = vi.hoisted(() => vi.fn());
@@ -13,6 +20,7 @@ const sweepExpiredOffers = vi.hoisted(() => vi.fn().mockResolvedValue({ expired:
 const awardBid = vi.hoisted(() => vi.fn());
 const publish = vi.hoisted(() => vi.fn());
 const notifyClaimOffered = vi.hoisted(() => vi.fn());
+const ensureWatching = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/prisma", () => ({ prisma: db }));
 vi.mock("@/lib/agent-api/validation", () => ({ isConfirmed }));
@@ -20,6 +28,7 @@ vi.mock("@/lib/agent-api/offer", () => ({ offerNext, scheduleOfferExpiry, sweepE
 vi.mock("@/lib/agent-api/bid", () => ({ awardBid }));
 vi.mock("@/lib/agent-api/events", () => ({ publish }));
 vi.mock("@/lib/agent-notifications", () => ({ notifyClaimOffered }));
+vi.mock("@/lib/watch", () => ({ ensureWatching }));
 
 import { dispatchReadyIssues, findReadyIssues, getDispatcherMetrics } from "./dispatcher";
 
@@ -48,8 +57,27 @@ const readyBug = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  db.$transaction.mockImplementation((fn: (tx: unknown) => unknown) => fn(db));
   db.bug.findMany.mockResolvedValue([readyBug]);
+  db.bug.update.mockResolvedValue({ id: "bug-1" });
   db.issueBid.findMany.mockResolvedValue([]);
+  db.issueClaim.update.mockResolvedValue({ id: "claim-1" });
+  db.issueClaim.findUnique.mockResolvedValue({
+    id: "claim-1",
+    status: "offered",
+    releasedAt: null,
+    beneficiary: { name: "Bob" },
+    bug: {
+      id: "bug-1",
+      title: "Ready",
+      status: "open",
+      assigneeId: null,
+      tenantId: "tenant",
+      projectId: "project-1",
+      severity: "medium",
+      assignee: null,
+    },
+  });
   isConfirmed.mockResolvedValue(true);
   offerNext.mockResolvedValue({
     claim: { id: "claim-1", bugId: "bug-1", offeredAt: new Date() },
@@ -338,5 +366,72 @@ describe("dispatchReadyIssues", () => {
     expect(result).toMatchObject({ awarded: 1, offered: 1, skipped: 0 });
     expect(awardBid).toHaveBeenCalledWith({ id: "reporter" }, "bid-aged", dispatcher);
     expect(offerNext).toHaveBeenCalledWith(db, dispatcher, expect.objectContaining({ id: "bug-unbid" }));
+  });
+
+  it("directly assigns the top candidate, setting deliverBy, activities, and watcher inside a locked transaction (#509)", async () => {
+    const result = await dispatchReadyIssues(dispatcher, "project-1", {
+      policy: "direct_assign",
+    });
+
+    expect(result).toMatchObject({ awarded: 1, offered: 0, skipped: 0 });
+    expect(db.$transaction).toHaveBeenCalled();
+    expect(db.$queryRaw).toHaveBeenCalled();
+    expect(db.issueClaim.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "claim-1" },
+        data: expect.objectContaining({
+          status: "active",
+          claimedAt: expect.any(Date),
+          lastHeartbeatAt: expect.any(Date),
+          deliverBy: expect.any(Date),
+        }),
+      }),
+    );
+    expect(db.bug.update).toHaveBeenCalledWith({
+      where: { id: "bug-1" },
+      data: {
+        assigneeId: "bob",
+        status: "in_progress",
+      },
+    });
+    expect(db.bugActivity.createMany).toHaveBeenCalledWith({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          type: "status_changed",
+          actorId: "bob",
+        }),
+      ]),
+    });
+    expect(ensureWatching).toHaveBeenCalledWith(db, "bug-1", ["bob"]);
+    expect(publish).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        type: "claim.accepted",
+        actorAgentId: "agent-disp",
+        bugId: "bug-1",
+        payload: expect.objectContaining({
+          claimId: "claim-1",
+          issueId: "bug-1",
+          beneficiaryUserId: "bob",
+        }),
+      }),
+    );
+  });
+
+  it("handles released or unavailable offer during direct_assign (#509)", async () => {
+    db.issueClaim.findUnique.mockResolvedValue({
+      id: "claim-1",
+      status: "released",
+      releasedAt: new Date(),
+    });
+
+    const result = await dispatchReadyIssues(dispatcher, "project-1", {
+      policy: "direct_assign",
+    });
+
+    expect(result.awarded).toBe(0);
+    expect(result.errors).toEqual([
+      { issueId: "bug-1", error: "This offer is no longer available." },
+    ]);
   });
 });

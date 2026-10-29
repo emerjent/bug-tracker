@@ -10,6 +10,9 @@ import { awardBid } from "@/lib/agent-api/bid";
 import { notifyClaimOffered } from "@/lib/agent-notifications";
 import { WORK_READINESS_VOTE_THRESHOLD } from "@/lib/ticket-assignment";
 import { workflowFor } from "@/lib/workflow";
+import { assigneeChangedSummary, statusChangedSummary } from "@/lib/activity-log";
+import { ensureWatching } from "@/lib/watch";
+import { deliveryDeadline, deliveryWindowMinutes } from "@/lib/claim-deadline";
 
 const id = z.string().trim().min(1).max(191);
 
@@ -280,7 +283,7 @@ async function offerIssue(
 }
 
 /**
- * Directly assign an issue to the top candidate (bypass bidding).
+ * Directly assign an issue to the top candidate (bypass bidding) (#509).
  */
 async function assignDirectly(
   agent: AgentContext,
@@ -298,35 +301,105 @@ async function assignDirectly(
     throw new IssueApiError(409, "No eligible candidate available for direct assignment.");
   }
 
-  // Accept the offer immediately to create an active claim
-  const claim = await prisma.issueClaim.update({
-    where: { id: offerResult.claim.id },
-    data: {
-      status: "active",
-      claimedAt: new Date(),
-      lastHeartbeatAt: new Date(),
-    },
-  });
+  // Accept the offer immediately inside a locked transaction (#509)
+  await prisma.$transaction(async (tx) => {
+    if ("$queryRaw" in tx && typeof tx.$queryRaw === "function") {
+      await tx.$queryRaw`SELECT "id" FROM "Bug" WHERE "id" = ${issue.id} AND "tenantId" = ${agent.tenantId} FOR UPDATE`;
+      await tx.$queryRaw`SELECT "id" FROM "IssueClaim" WHERE "id" = ${offerResult.claim.id} FOR UPDATE`;
+    }
 
-  await prisma.bug.update({
-    where: { id: issue.id },
-    data: {
-      assigneeId: offerResult.beneficiaryUserId,
-      status: "in_progress",
-    },
-  });
+    const fresh = await tx.issueClaim.findUnique({
+      where: { id: offerResult.claim.id },
+      include: {
+        beneficiary: { select: { name: true } },
+        bug: {
+          select: {
+            id: true,
+            title: true,
+            status: true,
+            assigneeId: true,
+            tenantId: true,
+            projectId: true,
+            severity: true,
+            assignee: { select: { name: true } },
+          },
+        },
+      },
+    });
 
-  await publish(prisma, {
-    tenantId: agent.tenantId,
-    type: "claim.accepted",
-    actorAgentId: agent.agentId,
-    bugId: issue.id,
-    payload: {
-      claimId: claim.id,
-      issueId: issue.id,
-      projectId: issue.projectId,
-      beneficiaryUserId: offerResult.beneficiaryUserId,
-    },
+    if (!fresh || fresh.status !== "offered" || fresh.releasedAt) {
+      throw new IssueApiError(409, "This offer is no longer available.");
+    }
+
+    const now = new Date();
+    const workflow = await workflowFor(fresh.bug.projectId, tx);
+    const deliverBy = deliveryDeadline(
+      now,
+      deliveryWindowMinutes(fresh.bug.severity, workflow.deliveryMinutes),
+    );
+
+    const claim = await tx.issueClaim.update({
+      where: { id: fresh.id },
+      data: {
+        status: "active",
+        claimedAt: now,
+        lastHeartbeatAt: now,
+        deliverBy,
+      },
+    });
+
+    await tx.bug.update({
+      where: { id: issue.id },
+      data: {
+        assigneeId: offerResult.beneficiaryUserId,
+        status: "in_progress",
+      },
+    });
+
+    await tx.bugActivity.createMany({
+      data: [
+        ...(fresh.bug.assigneeId !== offerResult.beneficiaryUserId
+          ? [
+              {
+                bugId: issue.id,
+                actorId: offerResult.beneficiaryUserId,
+                type: "assignee_changed" as const,
+                summary: assigneeChangedSummary(
+                  fresh.bug.assignee?.name ?? null,
+                  fresh.beneficiary?.name ?? null,
+                ),
+                metadata: {
+                  field: "assignee",
+                  from: fresh.bug.assigneeId,
+                  to: offerResult.beneficiaryUserId,
+                },
+              },
+            ]
+          : []),
+        {
+          bugId: issue.id,
+          actorId: offerResult.beneficiaryUserId,
+          type: "status_changed" as const,
+          summary: statusChangedSummary("open", "in_progress"),
+          metadata: { field: "status", from: "open", to: "in_progress" },
+        },
+      ],
+    });
+
+    await ensureWatching(tx, issue.id, [offerResult.beneficiaryUserId]);
+
+    await publish(tx, {
+      tenantId: agent.tenantId,
+      type: "claim.accepted",
+      actorAgentId: agent.agentId,
+      bugId: issue.id,
+      payload: {
+        claimId: claim.id,
+        issueId: issue.id,
+        projectId: issue.projectId,
+        beneficiaryUserId: offerResult.beneficiaryUserId,
+      },
+    });
   });
 }
 
