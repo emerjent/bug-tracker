@@ -1,4 +1,5 @@
 import type { Prisma, PrismaClient } from "@prisma/client";
+import { AGENT_EVENT_TYPES } from "@/lib/agent-api/events";
 
 /**
  * Webhook subscription limits (#512).
@@ -28,6 +29,21 @@ export type CreateSubscriptionResult =
 export function normalizeSubscriptionEvents(events: readonly string[] | undefined): string[] {
   if (!events) return [];
   return [...new Set(events.map((event) => event.trim()).filter(Boolean))];
+}
+
+/** The event names a subscription may narrow to; delivery matches them exactly (#500). */
+export const SUBSCRIBABLE_EVENT_TYPES: readonly string[] = AGENT_EVENT_TYPES;
+
+/**
+ * Event names in `events` that no publisher emits (#500). A subscription
+ * stores exact names and delivery only sends an event whose type is in the
+ * list, so an unknown name is not a harmless typo: it silently receives
+ * nothing. The route refuses these instead of storing them.
+ */
+export function unknownSubscriptionEvents(events: readonly string[] | undefined): string[] {
+  if (!events) return [];
+  const known = new Set(SUBSCRIBABLE_EVENT_TYPES);
+  return [...new Set(events.map((event) => event.trim()).filter((event) => event && !known.has(event)))];
 }
 
 export async function createSubscriptionRecord(

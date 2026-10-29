@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createSubscriptionRecord, MAX_SUBSCRIPTIONS_PER_AGENT, normalizeSubscriptionEvents } from "./manage";
+import { createSubscriptionRecord, MAX_SUBSCRIPTIONS_PER_AGENT, normalizeSubscriptionEvents, SUBSCRIBABLE_EVENT_TYPES, unknownSubscriptionEvents } from "./manage";
 
 const db = {
   webhookSubscription: { count: vi.fn(), findFirst: vi.fn(), create: vi.fn() },
@@ -57,5 +57,24 @@ describe("webhook subscription limits (#512)", () => {
       "issue.created",
     ]);
     expect(normalizeSubscriptionEvents(undefined)).toEqual([]);
+  });
+});
+
+describe("webhook event filters name real events (#500)", () => {
+  it("accepts every type the agent event catalogue publishes", () => {
+    expect(unknownSubscriptionEvents(SUBSCRIBABLE_EVENT_TYPES)).toEqual([]);
+    expect(SUBSCRIBABLE_EVENT_TYPES).toContain("issue.created");
+  });
+
+  it("names each unknown type once, ignoring surrounding whitespace", () => {
+    expect(unknownSubscriptionEvents(["issue.created", " issue.mergd ", "issue.mergd", "claim.*"])).toEqual([
+      "issue.mergd",
+      "claim.*",
+    ]);
+  });
+
+  it("treats an omitted or empty filter as every event", () => {
+    expect(unknownSubscriptionEvents(undefined)).toEqual([]);
+    expect(unknownSubscriptionEvents([])).toEqual([]);
   });
 });

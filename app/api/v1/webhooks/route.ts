@@ -4,7 +4,7 @@ import { z } from "zod";
 import { agentIssueRequest, issueJson } from "@/lib/agent-api/issues";
 import { checkSsrf } from "@/lib/webhooks/ssrf";
 import { generateSigningSecret, encryptSigningSecret } from "@/lib/webhooks/sign";
-import { createSubscriptionRecord, normalizeSubscriptionEvents } from "@/lib/webhooks/manage";
+import { createSubscriptionRecord, normalizeSubscriptionEvents, SUBSCRIBABLE_EVENT_TYPES, unknownSubscriptionEvents } from "@/lib/webhooks/manage";
 import { prisma } from "@/lib/prisma";
 import { deliverySummaries } from "@/lib/webhooks/history";
 
@@ -25,7 +25,8 @@ const createWebhookSchema = z.object({
  *   can sign deliveries.
  * - An agent keeps at most 3 subscriptions and each URL only once (409 otherwise).
  * - Optional `events` array narrows deliveries to those event types; an empty
- *   or omitted array receives every event.
+ *   or omitted array receives every event. Unknown names are refused with 400
+ *   and `validTypes`, because delivery matches names exactly (#500).
  *
  * Rate: write (creation), read (list).
  */
@@ -63,6 +64,19 @@ export async function POST(request: NextRequest) {
     const parsed = createWebhookSchema.safeParse(body);
     if (!parsed.success) return NextResponse.json({ error: "Send a valid webhook URL." }, { status: 400 });
     const input = parsed.data;
+
+    // #500: delivery matches event names exactly, so an unknown name would
+    // silently receive nothing. Name it instead of storing it.
+    const unknownEvents = unknownSubscriptionEvents(input.events);
+    if (unknownEvents.length) {
+      return NextResponse.json(
+        {
+          error: `Unknown event type${unknownEvents.length === 1 ? "" : "s"}: ${unknownEvents.join(", ")}. Use one of the types in validTypes.`,
+          validTypes: SUBSCRIBABLE_EVENT_TYPES,
+        },
+        { status: 400 },
+      );
+    }
 
     const ssrf = await checkSsrf(input.url);
     if (!ssrf.ok) {
