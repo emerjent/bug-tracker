@@ -149,7 +149,7 @@ export async function offerNext(db: Db, caller: { agentId?: string; tenantId: st
       bugId: { not: bug.id },
     },
   });
-  if (otherPending) {
+  if (otherPending && otherPending.bugId !== bug.id) {
     return null;
   }
 
