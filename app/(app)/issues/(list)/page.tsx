@@ -91,7 +91,7 @@ import { LoadError } from "@/components/load-error";
 import { logLoadFailure } from "@/lib/load-error";
 import { AREA_PARAM, parseProjectAreaFilter, projectAreaFilterWhere } from "@/lib/project-area-filter";
 import { openIssueStages, parseIssueStageView, type IssueStage } from "@/lib/issue-stage";
-import { isUnstructuredDraft } from "@/lib/ideas";
+import { splitReportedIdeas } from "@/lib/ideas";
 import { voteDirection } from "@/lib/voting";
 import { issuePath } from "@/lib/issue-ref";
 import { PROJECT_ALL_PARAM, showsAllProjects } from "@/lib/issue-list-filters";
@@ -446,7 +446,12 @@ export default async function BugsPage({
       console.error("[bugs] issue stage lookup failed", error);
     }
     if (stageView) {
-      const ids = [...stages.entries()].filter(([, stage]) => stage === stageView).map(([id]) => id);
+      let ids = [...stages.entries()].filter(([, stage]) => stage === stageView).map(([id]) => id);
+      if (inboxView === "ideas" || inboxView === "drafts") {
+        // #700: Drafted ideas and New ideas split the reported issues, so one idea is never in both.
+        const split = await splitReportedIdeas(prisma, ids);
+        ids = inboxView === "drafts" ? split.drafts : split.ideas;
+      }
       where.id = { in: ids };
       try {
         totalCount = await prisma.bug.count({ where });
@@ -837,16 +842,19 @@ export default async function BugsPage({
     value === ALL_STATUS ? allCount : value === REJECTED_STATUS ? rejectedCount : value === DUPLICATE_STATUS ? duplicateCount : value === READY_TO_MERGE_STATUS ? readyToMergeCount : countForStatus(value);
   // The Inbox's other lists, counted only while it is open.
   const liveTabWhere = { ...statusTabWhere, status: defaultStatusWhere(false) };
+  // #700: both idea badges count the same idea-stage issues the lists show, split by draft or not.
+  const ideaStageIssueIds = async () =>
+    [...(await openIssueStages(prisma, liveTabWhere)).entries()].filter(([, stage]) => stage === "idea").map(([id]) => id);
   const [designCount, ideasCount, draftsCount] = inboxView && tenantId ? await Promise.all([
     loadOrEmpty("design inbox", () => prisma.bug.count({ where: { ...liveTabWhere, redesigns: DESIGN_WHERE } }), 0),
     loadOrEmpty(
       "ideas inbox",
-      async () => [...(await openIssueStages(prisma, liveTabWhere)).values()].filter((stage) => stage === "idea").length,
+      async () => (await splitReportedIdeas(prisma, await ideaStageIssueIds())).ideas.length,
       0,
     ),
     loadOrEmpty(
       "drafts inbox",
-      () => prisma.bug.count({ where: { ...liveTabWhere, createdByAgentId: null } }),
+      async () => (await splitReportedIdeas(prisma, await ideaStageIssueIds())).drafts.length,
       0,
     ),
   ]) : [0, 0, 0];

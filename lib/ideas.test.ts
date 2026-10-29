@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { formatStructuredDescription, isUnstructuredDraft } from "./ideas";
+import { describe, expect, it, vi } from "vitest";
+import { formatStructuredDescription, isUnstructuredDraft, splitReportedIdeas } from "./ideas";
 
 describe("Drafted ideas (#1162)", () => {
   it("identifies unstructured human drafts correctly", () => {
@@ -44,5 +44,31 @@ describe("Drafted ideas (#1162)", () => {
 
     // The output is now recognized as structured, so it moves out of drafts
     expect(isUnstructuredDraft({ createdByAgentId: null, description: structured })).toBe(false);
+  });
+});
+
+describe("splitReportedIdeas (#700)", () => {
+  const structured = "## Summary\nx\n\n## Problem\ny\n\n## Proposed fix\nz";
+  const rows = [
+    { id: "human-raw", createdByAgentId: null, description: "Can we add dark mode?" },
+    { id: "human-structured", createdByAgentId: null, description: structured },
+    { id: "agent-raw", createdByAgentId: "agent-1", description: "Can we add dark mode?" },
+    { id: "agent-structured", createdByAgentId: "agent-1", description: structured },
+  ];
+
+  it("puts each reported idea in exactly one list", async () => {
+    const db = { bug: { findMany: vi.fn(async () => rows) } };
+    const { drafts, ideas } = await splitReportedIdeas(db, rows.map((r) => r.id));
+
+    expect(drafts).toEqual(["human-raw"]);
+    expect(ideas.sort()).toEqual(["agent-raw", "agent-structured", "human-structured"]);
+    expect(drafts.filter((id) => ideas.includes(id))).toEqual([]);
+    expect(drafts.length + ideas.length).toBe(rows.length);
+  });
+
+  it("does not query when there are no reported ideas", async () => {
+    const db = { bug: { findMany: vi.fn() } };
+    expect(await splitReportedIdeas(db, [])).toEqual({ drafts: [], ideas: [] });
+    expect(db.bug.findMany).not.toHaveBeenCalled();
   });
 });

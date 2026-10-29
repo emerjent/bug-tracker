@@ -50,3 +50,23 @@ export function formatStructuredDescription(
 
   return `## Summary\n${fallbackSummary}\n\n## Problem Statement\n${fallbackProblem}\n\n## Proposed Solution\n${fallbackSolution}\n\n## Acceptance Criteria\n${fallbackCriteria}\n`;
 }
+
+/**
+ * Splits reported-stage issue ids into the Inbox's two lists (#700). A draft is
+ * a person-filed idea that is not yet structured (`isUnstructuredDraft`); every
+ * other reported idea belongs to New ideas, so each lands in exactly one list.
+ */
+export async function splitReportedIdeas(
+  db: { bug: { findMany: (args: { where: { id: { in: string[] } }; select: { id: true; createdByAgentId: true; description: true } }) => Promise<Array<{ id: string; createdByAgentId: string | null; description: string }>> } },
+  ids: string[],
+): Promise<{ drafts: string[]; ideas: string[] }> {
+  if (ids.length === 0) return { drafts: [], ideas: [] };
+  const rows = await db.bug.findMany({
+    where: { id: { in: ids } },
+    select: { id: true, createdByAgentId: true, description: true },
+  });
+  const drafts: string[] = [];
+  const ideas: string[] = [];
+  for (const row of rows) (isUnstructuredDraft(row) ? drafts : ideas).push(row.id);
+  return { drafts, ideas };
+}

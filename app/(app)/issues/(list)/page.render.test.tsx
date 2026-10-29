@@ -100,6 +100,9 @@ const BUG = {
   _count: { comments: 3, attachments: 1 },
 };
 
+// The Inbox's idea lists also read ids through findMany (#700), so pick the list query itself.
+const lastListQuery = () => findMany.mock.calls.filter((call) => call[0]?.select?.title).at(-1)![0];
+
 async function renderList(params: Record<string, string> = {}) {
   const page = (await BugsPage({ searchParams: Promise.resolve(params) })) as ReactElement;
   return renderToStaticMarkup(page);
@@ -334,7 +337,7 @@ describe("issue list layout", () => {
     expect(inbox).toMatch(/Inbox<span[^>]*>2<\/span>/);
     // Still red while selected, since issues are waiting.
     expect(inbox).toMatch(/<span class="[^"]*bg-zk-bad-bg[^"]*">2<\/span>/);
-    expect(findMany.mock.calls.at(-1)![0].where.agentQuestions).toEqual({ some: { answeredAt: null } });
+    expect(lastListQuery().where.agentQuestions).toEqual({ some: { answeredAt: null } });
   });
 
   it("opens the Inbox with how it works, then its lists: Need your input, Design feedback needed, New ideas, Drafted ideas", async () => {
@@ -379,20 +382,22 @@ describe("issue list layout", () => {
 
   it("lists issues with an open redesign under Design feedback needed, reported issues under New ideas, and drafts under Drafted ideas", async () => {
     await renderList({ status: "escalated", inbox: "design" });
-    let where = findMany.mock.calls.at(-1)![0].where;
+    let where = lastListQuery().where;
     expect(where.redesigns).toEqual({ some: { status: "proposed" } });
     expect(where).not.toHaveProperty("agentQuestions");
     expect(where.status).toEqual({ in: ["open", "in_progress"] });
 
     await renderList({ status: "escalated", inbox: "ideas" });
-    where = findMany.mock.calls.at(-1)![0].where;
+    where = lastListQuery().where;
     expect(where.id).toEqual({ in: ["bug-1"] });
     expect(where).not.toHaveProperty("agentQuestions");
 
     await renderList({ status: "escalated", inbox: "drafts" });
-    where = findMany.mock.calls.at(-1)![0].where;
+    where = lastListQuery().where;
     expect(where).not.toHaveProperty("agentQuestions");
     expect(where.createdByAgentId).toBeNull();
+    // #700: BUG is already structured, so it belongs to New ideas only, not Drafted ideas.
+    expect(where.id).toEqual({ in: [] });
   });
 
   it("drops the Inbox list choice when moving to another tab", async () => {
@@ -421,7 +426,7 @@ describe("issue list layout", () => {
   it("lands on the Inbox; All (?status=all) shows every issue, finished ones too", async () => {
     let html = await renderList();
     expect(html).toContain('aria-label="How the Inbox works"');
-    expect(findMany.mock.calls.at(-1)![0].where.agentQuestions).toEqual({ some: { answeredAt: null } });
+    expect(lastListQuery().where.agentQuestions).toEqual({ some: { answeredAt: null } });
 
     html = await renderList({ q: "login", status: "all" });
     expect(findMany.mock.calls.at(-1)![0].where).not.toHaveProperty("status");
