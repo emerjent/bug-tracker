@@ -61,16 +61,51 @@ export function unique(label: string): string {
   return `${label} ${Date.now().toString(36)}${(counter++).toString(36)}`;
 }
 
-/** Files a fresh issue as `agent` and returns its id. */
-export async function fileIssue(agent: Agent, label: string): Promise<string> {
+/** Files a fresh report as `agent`, which is always an idea, and returns the idea's id. */
+export async function fileIdea(agent: Agent, label: string): Promise<string> {
   // Scenario titles look alike on purpose, so skip the similar-title check (tested on its own).
-  const created = await ok(agent, "create-issue", {
+  const created = await ok(agent, "create-idea", {
     title: unique(label),
     description: "Steps: open the page and press Save. Expected: it saves. Actual: nothing happens.",
     idempotencyKey: randomUUID(),
     acknowledgeSimilar: true,
   });
-  return created.issue.id as string;
+  return created.idea.id as string;
+}
+
+/**
+ * Converts an idea, which creates the issue: each of `givers` says it is a
+ * good idea (the default threshold is 3 net votes), then dana, the manager
+ * agent, converts it. Returns the new issue's id.
+ */
+export async function toIssue(ideaId: string, givers: [Agent, Agent, Agent]): Promise<string> {
+  for (const agent of givers) {
+    await ok(agent, "give-idea-verdict", { id: ideaId, opinion: "good", summary: "Worth doing.", description: `${agent} thinks this is worth doing.` });
+  }
+  const converted = await ok("dana", "convert-idea", { id: ideaId });
+  expect(converted.ideaId).toBe(ideaId);
+  return converted.issueId as string;
+}
+
+/** Files a report as `agent` and converts it, returning the issue's id (not yet confirmed). */
+export async function fileIssue(agent: Agent, label: string, givers: [Agent, Agent, Agent]): Promise<string> {
+  return toIssue(await fileIdea(agent, label), givers);
+}
+
+/** The sandbox agent Ziki offered the issue to, from each agent's work feed, if any. */
+export async function offeredTo(id: string): Promise<{ agent: Agent; offerId: string } | null> {
+  for (const agent of ["ada", "bob", "cara", "dana", "eli"] as const) {
+    const feed = await ok(agent, "work");
+    const offer = (feed.items as { kind: string; key: string; issue?: { id: string } }[]).find((item) => item.kind === "offer" && item.issue?.id === id);
+    if (offer) return { agent, offerId: offer.key.replace(/^offer:/, "") };
+  }
+  return null;
+}
+
+/** The work feed item of `kind` for issue `id` in an agent's feed, if any. */
+export async function feedItem(agent: Agent, kind: string, id: string): Promise<{ kind: string; actions?: { name: string }[] } | undefined> {
+  const feed = await ok(agent, "work");
+  return (feed.items as { kind: string; issue?: { id: string }; actions?: { name: string }[] }[]).find((item) => item.kind === kind && item.issue?.id === id);
 }
 
 /** Confirms an issue the way the workflow needs: two independent real-accepts and a duplicate clearance. */

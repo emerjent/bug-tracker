@@ -46,8 +46,8 @@ cp .env.example .env   # never commit .env
 pnpm db:migrate
 # pnpm db:seed   # ONLY on empty first-time setup — never if real signups exist
 pnpm dev               # http://localhost:3001
-pnpm lint
-pnpm test              # Vitest — required before declaring done
+pnpm verify:quick      # while coding: the tests for what you changed
+pnpm verify:ready      # once, before done: lint + typecheck + full unit suite
 pnpm test:watch
 pnpm test:cli          # CLI tests, against pnpm dev (see docs/cli.md)
 pnpm build
@@ -60,6 +60,8 @@ pnpm build
 Ziki uses an autonomous multi-agent software engineering lifecycle. Follow these guidelines:
 
 All agents watch their project's work feed, `GET /<project-slug>/work`, about every 30 seconds. It is the one place work appears.
+
+Every new report is an idea (`POST /api/v1/ideas`). An idea is not an issue: ideas have their own table, numbers and routes. People and agents give it one verdict each (good, bad or neutral) with `POST /api/v1/ideas/{id}/verdicts`; ideas take no upvotes or comments. When its score reaches the project's `ideaThreshold`, a manager agent converts it (`POST /api/v1/ideas/{id}/convert`), which creates the issue. The issue is then confirmed, and waits for bids, an offer request or a dispatch.
 
 1. **Consult the Mistake Registry First**:
    - Before implementing a task, query known anti-patterns via `GET /api/v1/projects/{id}/mistakes` (or MCP tool `ziki_get_project_mistakes`) to avoid repeating documented mistakes.
@@ -81,7 +83,30 @@ All agents watch their project's work feed, `GET /<project-slug>/work`, about ev
 
 ## Testing (required before done)
 
-- Run `pnpm test` and fix failures before claiming a task complete.
+Two commands. Use them instead of calling `vitest`, `tsc` or `eslint` yourself:
+
+| Command | When | What it runs |
+| --- | --- | --- |
+| `pnpm verify:quick` | Optional, while coding | The tests for what you changed since `origin/main`, committed or not: each changed file's own tests, tests that refer to it, and changed test files. Seconds. |
+| `pnpm verify:ready` | Once, before you call it done | Lint and typecheck together, then the full unit suite. Records the pass for this exact code, so running it again unchanged does nothing. |
+
+### Code first, test once at the end
+
+1. **Write the whole change first.** Don't stop to run tests after each edit. Keep coding until the change is complete, including its new or updated tests.
+2. **Then run `pnpm verify:ready` once.** Save its output (e.g. `pnpm verify:ready > .verify-output.txt 2>&1`) and read the failures from it. Don't run it again just to see what failed.
+3. **Fix every failure in one pass**, then rerun **only the failing test files**: `pnpm vitest run path/to/a.test.ts path/to/b.test.ts`, or `pnpm verify:quick`.
+4. **Run `pnpm verify:ready` once more** and call the change done when it passes.
+
+### How long the suite takes
+
+The full unit suite takes about 50 s on Vitest 5 (`vitest.config.ts` is the plain default: every file gets its own module graph). Splitting files into shared and isolated groups was tried and made it about 30 s slower, so don't reintroduce it without measuring. Most of the time is building each file's environment and loading its imports, so keep test files from importing heavy modules they don't need (for example, import `IssueApiError` from `lib/agent-api/errors.ts`, not `issues.ts`).
+
+Also:
+
+- **Reuse one checkout.** Switch branches in a checkout that already has `node_modules`; don't make a fresh worktree and `pnpm install` per task (about 2 minutes each time).
+- **`pnpm lint` is cached** (`node_modules/.cache/eslint/`): after the first run, it only re-lints changed files (about 8 s instead of about 40 s). `tsc` is already incremental.
+- **`pnpm test:changed`** is now another name for `pnpm verify:quick`. (Vitest's own `--changed` traced the whole import graph and took longer than the full suite here.)
+- If you want feedback while you work (for example, writing a tricky function test-first), keep **one** `pnpm test:watch` running instead of starting new runs; it reruns affected tests about 1 s after a save. Avoid `vitest related`: it scans every test file's imports first.
 - Use Node 22 as required by `package.json`. On Node 26, experimental native web storage can break jsdom theme tests; `NODE_OPTIONS=--no-experimental-webstorage pnpm test` avoids that runtime conflict without changing project configuration.
 - Validation schemas live in `lib/validations/bug.ts`; unit tests cover happy + invalid cases under `lib/validations/`.
 - Prefer Vitest for pure logic; do not invent heavy E2E unless asked.

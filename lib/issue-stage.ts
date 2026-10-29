@@ -2,77 +2,40 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { reviewerConflict, reviewerCreditConflict, type ReviewedBug } from "@/lib/agents/independence";
 import { workflowFor } from "@/lib/workflow";
 import { DEFAULT_PROJECT_WORKFLOW } from "@/lib/workflow-config";
-import { WORK_READINESS_VOTE_THRESHOLD } from "@/lib/ticket-assignment";
 
-/** Where an open issue sits before someone starts the work. Not a status. */
-export type IssueStage = "reported" | "confirmed" | "ready";
+/**
+ * Where an open issue sits before someone starts the work. Not a status.
+ * Ideas are not issues (#idea-table): they live in their own table and have
+ * no stage here.
+ *
+ * - `confirming`: converted from an idea, waiting for independent reviewers
+ *   to confirm it is real and not a duplicate.
+ * - `ready`: a confirmed issue, so it can be passed on.
+ */
+export type IssueStage = "confirming" | "ready";
 
 /** List filters. `ready` is the issue that can be passed on. */
-export type IssueStageView = "reported" | "confirmed" | "ready";
+export type IssueStageView = IssueStage;
 
 export const issueStageLabels: Record<IssueStage, string> = {
-  reported: "Reported",
-  confirmed: "Confirmed",
+  confirming: "Requires confirmation",
   ready: "Ready",
 };
 
-/**
- * An open report is an idea until reviewers accept it and it has enough
- * upvotes. Then it is an issue and can be passed on.
- */
-export type Intake = "idea" | "issue";
-
+/** `?stage=` values. */
 export function parseIssueStageView(raw: string | null | undefined): IssueStageView | null {
-  return raw === "reported" || raw === "confirmed" || raw === "ready" ? raw : null;
+  return raw === "confirming" || raw === "ready" ? raw : null;
 }
 
-export function intakeOf(stage: IssueStage): Intake {
-  return stage === "ready" ? "issue" : "idea";
+export function stageDetail(stage: IssueStage): string {
+  if (stage === "ready") return "Reviewers confirmed this issue, so it can be passed on.";
+  return "This issue can be passed on once independent reviewers confirm it is real and not a duplicate.";
 }
 
-export function intakeLabel(stage: IssueStage): string {
-  return intakeOf(stage) === "issue" ? "Issue" : "Idea";
-}
-
-/** Idea until both gates are met, including once the report is no longer open. */
-export function intakeKind(input: {
-  status: string;
-  voteCount: number;
-  confirmed: boolean;
-}): Intake {
-  const stage = issueStage(input);
-  if (stage) return intakeOf(stage);
-  if (input.status === "in_progress" || input.status === "resolved" || input.confirmed) return "issue";
-  return "idea";
-}
-
-export function intakeDetail(stage: IssueStage, voteCount: number): string {
-  if (stage === "ready") {
-    return "This is an issue. Reviewers accepted it and it has enough upvotes, so it can be passed on.";
-  }
-  if (stage === "confirmed") {
-    const left = Math.max(0, WORK_READINESS_VOTE_THRESHOLD - voteCount);
-    const votes = left === 1 ? "1 more upvote" : `${left} more upvotes`;
-    return `This is an idea. Reviewers accepted it. It needs ${votes} before it can be passed on as an issue.`;
-  }
-  return "This is an idea. It becomes an issue when reviewers accept it and three people upvote it. Then it can be passed on.";
-}
-
-/**
- * Reported and confirmed are still ideas: reviewers have not accepted it, or
- * it does not yet have three upvotes.
- * Ready is an issue: both gates are met, so it can be passed on.
- * Anything no longer open has no intake tag.
- */
-export function issueStage(input: {
-  status: string;
-  voteCount: number;
-  confirmed: boolean;
-}): IssueStage | null {
+/** The stage of an open issue. Anything no longer open has no stage. */
+export function issueStage(input: { status: string; confirmed: boolean }): IssueStage | null {
   if (input.status !== "open") return null;
-  if (!input.confirmed) return "reported";
-  if (input.voteCount < WORK_READINESS_VOTE_THRESHOLD) return "confirmed";
-  return "ready";
+  return input.confirmed ? "ready" : "confirming";
 }
 
 type AcceptingReview = { id: string; agentId: string; ownerUserId: string; onBehalfOfUserId?: string };
@@ -102,34 +65,44 @@ export function isConfirmedCount(
   return count >= needed;
 }
 
+/** Where an open issue stands on confirmation, from one bulk read (#714). */
+export type IssueConfirmation = {
+  stage: IssueStage;
+  /** Distinct independent owners who accepted it as real. */
+  accepts: number;
+  /** The project's `confirmationsNeeded`. */
+  needed: number;
+  /** An independent agent cleared it as not a duplicate. */
+  triageCleared: boolean;
+};
+
+type ReadConfirmation = Omit<IssueConfirmation, "stage"> & { status: string; confirmed: boolean };
+
 /**
- * Stage of every open issue matching `where`. A missing validation table
- * leaves the map empty so the list still renders.
+ * Confirmation state of every issue matching `where`, in a fixed number of
+ * queries. This is the one place "confirmed" is decided for lists, the work
+ * feed and the merge queue, under the same rule as `isConfirmed()`: enough
+ * independent real accepts AND an independent not-a-duplicate clearance, each
+ * counted only after the latest edit and unless undone.
  */
-export async function openIssueStages(
+async function readConfirmations(
   db: PrismaClient,
   where: Prisma.BugWhereInput,
-): Promise<Map<string, IssueStage>> {
+): Promise<Map<string, ReadConfirmation>> {
   const bugs = await db.bug.findMany({
-    where: { ...where, status: "open", isDeleted: false },
+    where,
     select: {
       id: true,
       projectId: true,
       status: true,
-      voteCount: true,
       beneficiaryUserId: true,
-      assigneeId: true,
       reporterId: true,
       createdByAgentId: true,
       createdByAgent: { select: { ownerUserId: true } },
-      claims: {
-        where: { status: "active", releasedAt: null },
-        select: { status: true, releasedAt: true, beneficiaryUserId: true, dispatcherUserId: true, agent: { select: { ownerUserId: true } } },
-      },
     },
   });
-  const stages = new Map<string, IssueStage>();
-  if (bugs.length === 0) return stages;
+  const result = new Map<string, ReadConfirmation>();
+  if (bugs.length === 0) return result;
 
   const ids = bugs.map((bug) => bug.id);
   const projectIds = [...new Set(bugs.map((bug) => bug.projectId))];
@@ -142,10 +115,14 @@ export async function openIssueStages(
       select: { bugId: true, editedAt: true },
     }),
     db.issueValidation.findMany({
-      where: { bugId: { in: ids }, kind: "real", verdict: "accept" },
+      where: {
+        bugId: { in: ids },
+        OR: [{ kind: "real", verdict: "accept" }, { kind: "duplicate", verdict: "reject" }],
+      },
       select: {
         id: true,
         bugId: true,
+        kind: true,
         createdAt: true,
         agentId: true,
         onBehalfOfUserId: true,
@@ -171,39 +148,76 @@ export async function openIssueStages(
     set.add(validationId);
     undoneByBug.set(event.bugId, set);
   }
+  // Only reviews given after the latest edit count, as in isConfirmed().
   const acceptsByBug = new Map<string, AcceptingReview[]>();
+  const clearsByBug = new Map<string, AcceptingReview[]>();
   for (const validation of validations) {
     const cutoff = revisedAt.get(validation.bugId);
     if (cutoff && validation.createdAt <= cutoff) continue;
-    const list = acceptsByBug.get(validation.bugId) ?? [];
+    const byBug = validation.kind === "duplicate" ? clearsByBug : acceptsByBug;
+    const list = byBug.get(validation.bugId) ?? [];
     list.push({
       id: validation.id,
       agentId: validation.agentId,
       ownerUserId: validation.agent.ownerUserId,
       onBehalfOfUserId: validation.onBehalfOfUserId,
     });
-    acceptsByBug.set(validation.bugId, list);
+    byBug.set(validation.bugId, list);
   }
 
   for (const bug of bugs) {
+    // As isConfirmed() does (recordedReviewBug, #579): a later assignee or
+    // claim must not undo a review that was independent when it was given.
     const reviewed: ReviewedBug = {
       beneficiaryUserId: bug.beneficiaryUserId,
       reporterId: bug.reporterId,
-      assigneeId: bug.assigneeId,
+      assigneeId: null,
       createdByAgent: bug.createdByAgent,
-      claims: bug.claims,
+      claims: [],
     };
-    const confirmed = isConfirmedCount(
-      confirmationCount({
-        createdByAgentId: bug.createdByAgentId,
-        accepts: acceptsByBug.get(bug.id) ?? [],
-        undoneIds: undoneByBug.get(bug.id) ?? new Set(),
-        bug: reviewed,
-      }),
-      workflows.get(bug.projectId)?.confirmationsNeeded ?? DEFAULT_PROJECT_WORKFLOW.confirmationsNeeded,
-    );
-    const stage = issueStage({ status: bug.status, voteCount: bug.voteCount, confirmed });
-    if (stage) stages.set(bug.id, stage);
+    const undoneIds = undoneByBug.get(bug.id) ?? new Set<string>();
+    const accepts = confirmationCount({ createdByAgentId: bug.createdByAgentId, accepts: acceptsByBug.get(bug.id) ?? [], undoneIds, bug: reviewed });
+    // The same independence rules decide whether a clearance counts.
+    const triageCleared = confirmationCount({ createdByAgentId: bug.createdByAgentId, accepts: clearsByBug.get(bug.id) ?? [], undoneIds, bug: reviewed }) > 0;
+    const needed = workflows.get(bug.projectId)?.confirmationsNeeded ?? DEFAULT_PROJECT_WORKFLOW.confirmationsNeeded;
+    const confirmed = isConfirmedCount(accepts, needed) && triageCleared;
+    result.set(bug.id, { status: bug.status, confirmed, accepts, needed, triageCleared });
   }
-  return stages;
+  return result;
+}
+
+/**
+ * Stage and confirmation state of every open issue matching `where`, from one
+ * bulk read (see `readConfirmations`). A missing validation table leaves the
+ * map empty so the list still renders.
+ */
+export async function openIssueConfirmations(
+  db: PrismaClient,
+  where: Prisma.BugWhereInput,
+): Promise<Map<string, IssueConfirmation>> {
+  const read = await readConfirmations(db, { ...where, status: "open", isDeleted: false });
+  const result = new Map<string, IssueConfirmation>();
+  for (const [id, { status, confirmed, accepts, needed, triageCleared }] of read) {
+    const stage = issueStage({ status, confirmed });
+    if (stage) result.set(id, { stage, accepts, needed, triageCleared });
+  }
+  return result;
+}
+
+/**
+ * Ids of the confirmed issues matching `where`, whatever their status (an
+ * issue being worked on is `in_progress`), from one bulk read.
+ */
+export async function confirmedIssueIds(db: PrismaClient, where: Prisma.BugWhereInput): Promise<Set<string>> {
+  const read = await readConfirmations(db, { ...where, isDeleted: false });
+  return new Set([...read].filter(([, c]) => c.confirmed).map(([id]) => id));
+}
+
+/** Stage of every open issue matching `where` (see `openIssueConfirmations`). */
+export async function openIssueStages(
+  db: PrismaClient,
+  where: Prisma.BugWhereInput,
+): Promise<Map<string, IssueStage>> {
+  const confirmations = await openIssueConfirmations(db, where);
+  return new Map([...confirmations].map(([id, confirmation]) => [id, confirmation.stage]));
 }

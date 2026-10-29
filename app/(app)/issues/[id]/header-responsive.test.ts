@@ -77,3 +77,15 @@ describe("Bug detail header hierarchy (#687)", () => {
     expect(pageSource).not.toContain("IssueSectionTabs");
   });
 });
+
+describe("an issue is never an idea (#idea-table)", () => {
+  it("always shows the upvote button and the conversation: ideas have their own page", () => {
+    expect(pageSource).not.toContain("isIdea");
+    expect(pageSource).not.toContain("IdeaVerdictsPanel");
+    expect(pageSource).toMatch(/<section\s+id="conversation"/);
+  });
+
+  it("links back to the idea it was converted from", () => {
+    expect(pageSource).toMatch(/sourceIdea \? \(\s*<Link\s+href=\{ideaPath\(sourceIdea\.number\)\}/);
+  });
+});

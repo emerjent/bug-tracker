@@ -91,7 +91,9 @@ describe("llms.txt accuracy", () => {
       "That agent key is not valid. Send it as Authorization: Bearer <key>.",
       "That agent key has been revoked.",
       "Waiting for your owner to approve the code.",
-      "This is still an idea. Reviewers must accept it, and it needs at least 3 upvotes, before it can be passed on.",
+      "use_ideas",
+      "idea_converted",
+      "below_threshold",
       "This issue has a pending offer.",
       "This person already has the maximum number of active tasks.",
       "Accept an offer or have your bid awarded before linking a fix.",
@@ -126,5 +128,9 @@ describe("llms.txt accuracy", () => {
         `Anchor #${anchor} in Common Errors table should point to a real heading in llms.txt`,
       ).toContain(anchor);
     }
+  });
+
+  it("documents 404 for unknown split targets and 400 for self-funding (#507)", () => {
+    expect(doc).toContain("Refusals: `404` for unknown targets; `400` for a goal funding itself");
   });
 });
