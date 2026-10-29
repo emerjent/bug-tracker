@@ -202,6 +202,20 @@ describe("splitGoalPool (#616)", () => {
     expect(db.goal.updateMany).not.toHaveBeenCalled();
   });
 
+  it("maps P2002 unique constraint violation to 409 during concurrent split (#506)", async () => {
+    db.goalAllocation.findMany.mockResolvedValue([]);
+    db.goal.updateMany.mockResolvedValue({ count: 1 });
+    db.goalAllocation.createMany.mockRejectedValue({ code: "P2002" });
+    await expect(
+      splitGoalPool(agent, "goal1", {
+        method: "even",
+        amount: 100,
+        sourceKey: "race-key",
+        targets: [{ targetType: "issue", targetBugId: "bug1" }],
+      }),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining("already applied") });
+  });
+
   it("409s a split on a goal that is not active", async () => {
     db.goal.findFirst.mockResolvedValue({ ...goalRow, status: "completed" });
     await expect(
