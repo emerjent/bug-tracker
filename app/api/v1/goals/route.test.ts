@@ -112,7 +112,7 @@ describe("GET /api/v1/goals (#616)", () => {
   it("lists the project's goals", async () => {
     const res = await listGET(request("http://localhost/api/v1/goals?projectId=project1", undefined, "GET"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ goals: [] });
+    expect(await res.json()).toEqual({ items: [], nextCursor: null });
   });
 
   it("404s a project outside the tenant", async () => {

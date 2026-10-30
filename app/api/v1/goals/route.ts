@@ -6,11 +6,25 @@ import { createGoalSchema } from "@/lib/validations/goal";
 
 export const runtime = "nodejs";
 
-/** GET ?projectId= — the project's goals with budget summaries, newest first (#616). */
+/** GET ?projectId=&after=&limit=&afterId= — the project's goals with budget summaries, newest first (#616). */
 export async function GET(request: NextRequest) {
   return agentIssueRequest(request, "goals.list", "observer", null, async (agent) => {
     const scope = await issueProject(agent, request.nextUrl.searchParams);
-    return NextResponse.json({ goals: await listGoals(scope.tenantId, scope.projectId) });
+    const params = request.nextUrl.searchParams;
+    const limitRaw = params.get("limit");
+    let limit: number | undefined;
+    if (limitRaw !== null && limitRaw !== "") {
+      const parsed = Number.parseInt(limitRaw, 10);
+      if (!Number.isNaN(parsed) && parsed > 0) limit = parsed;
+    }
+    const cursorRaw = params.get("after");
+    const cursorIdRaw = params.get("afterId");
+    let cursor: { createdAt: Date; id: string } | null = null;
+    if (cursorRaw !== null && cursorRaw !== "" && cursorIdRaw !== null && cursorIdRaw !== "") {
+      cursor = { createdAt: new Date(cursorRaw), id: cursorIdRaw };
+    }
+    const result = await listGoals(scope.tenantId, scope.projectId, cursor, limit);
+    return NextResponse.json({ items: result.items, nextCursor: result.nextCursor });
   });
 }
 

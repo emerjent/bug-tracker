@@ -24,6 +24,7 @@ import {
   splitProportional,
   type GoalBudgetSummary,
 } from "@/lib/goals/pool-split";
+import { cursorOrderBy, cursorWhere, toPage, type IssueCursor } from "@/lib/agent-api/create-policy";
 
 /**
  * Goal budgets and pool splitting (#616). The arithmetic lives in
@@ -171,17 +172,24 @@ export async function createGoal(agent: AgentContext, input: CreateGoalInput): P
  *
  * @param tenantId - Tenant the goals belong to.
  * @param projectId - Project whose goals to list.
+ * @param cursor - Cursor for pagination (createdAt, id tuple).
  * @param take - Row cap (default 50).
- * @returns Goal rows with `budget`, newest first.
+ * @returns Goal rows with `budget`, plus next cursor for pagination.
  */
-export async function listGoals(tenantId: string, projectId: string, take = 50): Promise<GoalWithBudget[]> {
-  const goals = await prisma.goal.findMany({
-    where: { tenantId, projectId },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take,
+export async function listGoals(
+  tenantId: string,
+  projectId: string,
+  cursor: IssueCursor | null,
+  take = 50
+): Promise<{ items: GoalWithBudget[]; nextCursor: string | null }> {
+  const rows = await prisma.goal.findMany({
+    where: { tenantId, projectId, ...cursorWhere(cursor) },
+    orderBy: cursorOrderBy(),
+    take: take + 1,
     select: goalSelect,
   });
-  return goals.map(withBudget);
+  const { items, nextCursor } = toPage(rows, take);
+  return { items: items.map(withBudget), nextCursor };
 }
 
 /**
