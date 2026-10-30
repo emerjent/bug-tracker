@@ -2,6 +2,7 @@ import type { PrismaClient } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { linkPullRequest } from "@/lib/github/link-pr";
 import { parseGitHubRepoUrl, parsePullRequestUrl, sameRepo } from "@/lib/github/merge-pr";
+import { createReviewOffers } from "@/lib/agent-api/review-offer";
 
 /**
  * Auto-link a pull request that names an issue (#474 follow-up).
@@ -99,12 +100,20 @@ export async function linkIssuesForOpenedPullRequest(
       const claim = bug.claims[0];
       if (!claim) continue;
       if (bug.pullRequestUrl === pr.pullRequestUrl) {
-        // A `synchronize`/`edited` on the linked PR: refresh the head SHA
-        // quietly — no second activity entry, event, or review offers.
+        // A `synchronize`/`edited` on the linked PR: refresh the head SHA.
+        // If the head moved, void old verdicts and re-offer review so
+        // independent reviewers re-verify the new commits (#593).
+        const headMoved = bug.pullRequestHeadSha && bug.pullRequestHeadSha !== pr.headSha;
         await db.bug.updateMany({
           where: { id: bug.id, pullRequestUrl: pr.pullRequestUrl },
           data: { pullRequestHeadSha: pr.headSha },
         });
+        await createReviewOffers(
+          db,
+          { agentId: claim.agentId ?? undefined, tenantId: project.tenantId },
+          bug.id,
+          { pullRequestUrl: pr.pullRequestUrl, headSha: pr.headSha },
+        ).catch(() => undefined);
         linked.push(bug.id);
         continue;
       }

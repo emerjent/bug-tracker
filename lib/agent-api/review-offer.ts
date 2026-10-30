@@ -247,7 +247,12 @@ export async function createReviewOffers(
     for (const o of existingOffers) {
       if (o.status === "offered" && !isReviewOfferExpired(o.offeredAt)) {
         excludeUserIds.add(o.beneficiaryUserId);
-      } else if (o.status === "accepted" || o.status === "completed") {
+      } else if (o.status === "accepted") {
+        excludeUserIds.add(o.beneficiaryUserId);
+      } else if (o.status === "completed" && o.headSha === bug.pullRequestHeadSha) {
+        // Only completed offers on the current head count toward the quota.
+        // Completed offers on an older head are stale: the head moved, and
+        // new reviewers must re-verify the new commits (#593).
         excludeUserIds.add(o.beneficiaryUserId);
       }
     }
@@ -400,7 +405,10 @@ export async function reofferReview(
       excludeUserIds.add(o.beneficiaryUserId);
     } else if (o.status === "accepted" && !isReviewDeadlineExpired(o.deadlineAt, now)) {
       excludeUserIds.add(o.beneficiaryUserId);
-    } else if (o.status === "completed") {
+    } else if (o.status === "completed" && o.headSha === bug.pullRequestHeadSha) {
+      // Only completed offers on the current head count toward the quota.
+      // Completed offers on an older head are stale: the head moved, and
+      // new reviewers must re-verify the new commits (#593).
       excludeUserIds.add(o.beneficiaryUserId);
     }
   }

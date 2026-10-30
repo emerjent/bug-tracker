@@ -449,7 +449,8 @@ describe("acceptFix: a successful accept (#434)", () => {
 
   it("pins the accepted fix to the head commit the last counted reviewer tested (#489)", async () => {
     confirmWith("rob", "sam");
-    verdict("r1", "rob", "rob", PR, "older-sha");
+    db.bug.findFirst.mockResolvedValue(bugRow({ pullRequestHeadSha: "reviewed-sha" }));
+    verdict("r1", "rob", "rob", PR, "reviewed-sha");
     verdict("r2", "sam", "sam", PR, "reviewed-sha");
 
     expect(await acceptFix(merger("m1", "mo", "merger"), "bug1")).toMatchObject({ status: 200, accepted: true });

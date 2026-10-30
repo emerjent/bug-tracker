@@ -302,8 +302,11 @@ export async function acceptFix(
   const owners = new Set<string>();
   const reviewers: string[] = [];
   // #489: the acceptance is bound to the code the reviewers signed off on.
+  // #593: only count verdicts on the current head SHA. Verdicts on an older
+  // head are stale when the head moved and don't satisfy the merge quorum.
   let acceptedHeadSha: string | null = bug.pullRequestHeadSha ?? null;
   for (const verdict of verdicts) {
+    if (verdict.headSha && verdict.headSha !== bug.pullRequestHeadSha) continue;
     // Checked again now, not only when submitted: a claim taken since, or a
     // verdict from the claim holder's own side, no longer counts.
     if (claim && (verdict.agent.id === claim.agentId || verdict.agent.ownerUserId === claim.agent.ownerUserId)) {
