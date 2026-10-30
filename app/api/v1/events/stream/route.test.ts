@@ -221,6 +221,33 @@ describe("events/stream SSE endpoint", () => {
     reader!.cancel();
   });
 
+  it("closes the stream when the agent key is revoked (#606)", async () => {
+    vi.useFakeTimers();
+    const res = await GET(request("/events/stream"));
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    await reader.read(); // connected event
+
+    // Revoke the agent key
+    db.agentApiKey.findUnique.mockResolvedValue({
+      ...key(),
+      revokedAt: new Date("2026-10-30T10:00:00Z"),
+    });
+
+    // Advance timers to trigger the heartbeat, which re-validates the key
+    await vi.advanceTimersByTimeAsync(15000);
+
+    // The stream should be closed: reader.read() resolves with done: true
+    const readResult = await Promise.race([
+      reader.read().then(({ done }) => ({ done })),
+      new Promise<{ done: false }>((resolve) => setTimeout(() => resolve({ done: false }), 100)),
+    ]);
+    expect(readResult.done).toBe(true);
+
+    try { await reader.cancel(); } catch {}
+    vi.useRealTimers();
+  });
+
   it("cleans up subscription on client abort", async () => {
     const controller = new AbortController();
     const req = new NextRequest(`http://localhost/api/v1/events/stream`, {

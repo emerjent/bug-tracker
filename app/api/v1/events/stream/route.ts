@@ -93,13 +93,25 @@ export async function GET(request: NextRequest) {
       const connectMsg = `event: connected\ndata: ${JSON.stringify({ timestamp: new Date().toISOString() })}\n\n`;
       controller.enqueue(encoder.encode(connectMsg));
 
-      heartbeatInterval = setInterval(() => {
+      heartbeatInterval = setInterval(async () => {
         if (closed) return;
         try {
-          controller.enqueue(encoder.encode(": ping\n\n"));
+          // #606: re-validate the agent key on each heartbeat. A revoked key
+          // must stop receiving events immediately instead of waiting for the
+          // 300s maxDuration ceiling.
+          await requireAgent(request);
+          try {
+            controller.enqueue(encoder.encode(": ping\n\n"));
+          } catch (err) {
+            cleanup();
+            controller.error(err);
+          }
         } catch (err) {
+          // Key revoked or invalid: close the stream immediately.
           cleanup();
-          controller.error(err);
+          try {
+            controller.close();
+          } catch {}
         }
       }, 15000);
 
