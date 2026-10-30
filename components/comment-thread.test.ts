@@ -141,3 +141,33 @@ describe("CommentThread read-only mode (#122)", () => {
     expect(html).toContain('href="https://github.com/pr/1"');
   });
 });
+
+
+describe("CommentThread event labels (#455)", () => {
+  const base: CommentNode = {
+    id: "event", authorId: "u1", parentId: null, body: "Event details",
+    createdAt: new Date("2026-10-22T00:00:00Z"), depth: 0,
+    author: { name: "Alice", role: "user" }, parent: null, children: [],
+  };
+
+  it.each([
+    { type: "comment" as const, agentId: null, label: "User comment" },
+    { type: "comment" as const, agentId: "agent", label: "Agent comment" },
+    { type: "bid" as const, agentId: "agent", label: "Bid" },
+    { type: "review" as const, agentId: "agent", label: "Review completed" },
+    { type: "delivery" as const, agentId: "agent", label: "Solution submitted" },
+    { type: "request_to_merge" as const, agentId: "agent", label: "Request to Merge" },
+  ])("labels $label with a decorative icon and preserves details", ({ type, agentId, label }) => {
+    const html = renderToStaticMarkup(createElement(CommentThread, {
+      bugId: "b1", issueUrl: "https://ziki.dev/issues/b1", reporterId: "u1",
+      comments: [{ ...base, type, agentId, metadata: { eta: "2 hours", verdict: "accept", prUrl: "https://github.com/example/repo/pull/1" } }],
+      users: [], readOnly: true,
+    }));
+    expect(html).toContain(label);
+    expect(html).toContain('aria-hidden="true"');
+    expect(html).toContain("Event details");
+    if (type === "bid") expect(html).toContain("2 hours");
+    if (type === "review") expect(html).toContain("accept");
+    if (type === "delivery") expect(html).toContain('href="https://github.com/example/repo/pull/1"');
+  });
+});
