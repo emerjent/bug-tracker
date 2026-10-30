@@ -50,15 +50,18 @@ test("an issue at Requires confirmation takes confirmations, and replies under t
   await expect(panel.getByText(reply)).toBeVisible();
 });
 
-test("an Open issue says it is not awarded, and takes comments and replies to them", async ({ page, uniq }) => {
+test("an Open issue says it is not awarded and takes comments and replies; in progress it keeps them but takes no more", async ({ page, uniq }) => {
   const url = await fileIssue(page, uniq("Open comments check"));
-  const prisma = e2eDb();
-  try {
-    const number = Number(new URL(url).pathname.split("/").pop());
-    await prisma.bug.updateMany({ where: { number, title: { contains: "Open comments check" } }, data: { status: "open" } });
-  } finally {
-    await prisma.$disconnect();
-  }
+  const number = Number(new URL(url).pathname.split("/").pop());
+  const setStatus = async (status: "open" | "in_progress") => {
+    const prisma = e2eDb();
+    try {
+      await prisma.bug.updateMany({ where: { number, title: { contains: "Open comments check" } }, data: { status } });
+    } finally {
+      await prisma.$disconnect();
+    }
+  };
+  await setStatus("open");
   await page.reload();
 
   await expect(page.getByTestId("award-box").getByRole("heading", { name: "Open: not awarded yet" })).toBeVisible();
@@ -68,7 +71,8 @@ test("an Open issue says it is not awarded, and takes comments and replies to th
   const body = `Same here on Firefox ${Date.now()}`;
   await comments.getByRole("form", { name: "Add a comment" }).getByRole("textbox").fill(body);
   await comments.getByRole("button", { name: "Comment", exact: true }).click();
-  await expect(comments.getByText(body)).toBeVisible();
+  // The reply below quotes the comment, so match the comment itself: the first.
+  await expect(comments.getByText(body).first()).toBeVisible();
 
   const reply = `Fixed by clearing the cache ${Date.now()}`;
   await comments.getByRole("button", { name: "Reply" }).first().click();
@@ -79,26 +83,13 @@ test("an Open issue says it is not awarded, and takes comments and replies to th
 
   // Both survive a reload: they were saved, not just drawn.
   await page.reload();
-  await expect(comments.getByText(body)).toBeVisible();
+  await expect(comments.getByText(body).first()).toBeVisible();
   await expect(comments.getByText(reply)).toBeVisible();
-});
 
-test("an in-progress issue shows its comments but takes no new ones", async ({ page, uniq }) => {
-  const url = await fileIssue(page, uniq("In progress comments check"));
-  const body = `A comment from while it was Open ${Date.now()}`;
-  const prisma = e2eDb();
-  try {
-    const number = Number(new URL(url).pathname.split("/").pop());
-    const bug = await prisma.bug.findFirstOrThrow({ where: { number, title: { contains: "In progress comments check" } }, select: { id: true, reporterId: true } });
-    await prisma.bug.update({ where: { id: bug.id }, data: { status: "in_progress" } });
-    await prisma.comment.create({ data: { bugId: bug.id, authorId: bug.reporterId, body } });
-  } finally {
-    await prisma.$disconnect();
-  }
+  // In progress, the comments stay but the issue takes no new ones.
+  await setStatus("in_progress");
   await page.reload();
-
-  const comments = page.getByTestId("issue-comments");
-  await expect(comments.getByText(body)).toBeVisible();
+  await expect(comments.getByText(body).first()).toBeVisible();
   await expect(comments.getByRole("form", { name: "Add a comment" })).toHaveCount(0);
   await expect(comments.getByRole("button", { name: "Reply" })).toHaveCount(0);
 });
