@@ -366,7 +366,7 @@ describe("issue list layout", () => {
     expect(nav).toMatch(/class="issues-status-nav min-w-0"/);
     expect(nav).not.toContain("ml-auto");
     const labels = [...nav.matchAll(/<span class="issues-status-label">([A-Za-z ]+)<\/span><span class="issues-status-count">/g)].map((m) => m[1]);
-    expect(labels).toEqual(["Ideas", "Requires confirmation", "Open", "In progress", "Done", "Ready to merge", "Live", "Closed", "All"]);
+    expect(labels).toEqual(["Ideas", "Requires confirmation", "Open", "In progress", "Delivered", "Done", "Ready to merge", "Live", "Closed", "All"]);
     const ideas = nav.match(/<a [^>]*data-testid="ideas-tab"[\s\S]*?<\/a>/)?.[0] ?? "";
     expect(ideas).toMatch(/href="\/issues"/);
     expect(ideas).toContain('aria-current="page"');
@@ -503,6 +503,7 @@ describe("issue list layout", () => {
           { status: "requires_confirmation", _count: { _all: 4 } },
           { status: "open", _count: { _all: 9 } },
           { status: "in_progress", _count: { _all: 2 } },
+          { status: "delivered", _count: { _all: 5 } },
           { status: "done", _count: { _all: 2 } },
           { status: "ready_to_merge", _count: { _all: 1 } },
           { status: "resolved", _count: { _all: 7 } },
@@ -513,7 +514,7 @@ describe("issue list layout", () => {
     const counts = Object.fromEntries(
       [...nav.matchAll(/<span class="issues-status-label">([A-Za-z ]+)<\/span><span class="issues-status-count">(\d+)<\/span>/g)].map((m) => [m[1], Number(m[2])]),
     );
-    expect(counts).toEqual({ Ideas: 4, "Requires confirmation": 4, Open: 9, "In progress": 2, Done: 2, "Ready to merge": 1, Live: 7, Closed: 3, All: 28 });
+    expect(counts).toEqual({ Ideas: 4, "Requires confirmation": 4, Open: 9, "In progress": 2, Delivered: 5, Done: 2, "Ready to merge": 1, Live: 7, Closed: 3, All: 33 });
   });
 
   it("shows the vote count once and no proof-link count in rows (#1060)", async () => {
