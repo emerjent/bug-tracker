@@ -368,7 +368,7 @@ describe("issue list layout", () => {
     expect(current(stages(html))).toEqual(["Ideas"]);
     expect(stages(html)).toContain('href="/issues"');
     expect(stages(html)).toContain('href="/issues?status=open"');
-    expect(stages(html)).toContain('href="/issues?status=done"');
+    expect(stages(html)).toContain('href="/issues?status=delivered"');
     expect(labels(statusList(html))).toEqual(["Ideas", "Requires confirmation"]);
     expect(current(statusList(html))).toEqual(["Ideas"]);
     expect(html.indexOf('aria-label="Stages"')).toBeLessThan(html.indexOf('<div class="issues-page'));
@@ -423,7 +423,7 @@ describe("issue list layout", () => {
     html = await renderList({ q: "login", status: "all" });
     expect(findMany.mock.calls.at(-1)![0].where).not.toHaveProperty("status");
     expect(current(stages(html))).toEqual([]);
-    expect(stages(html)).toContain('href="/issues?q=login&amp;status=done"');
+    expect(stages(html)).toContain('href="/issues?q=login&amp;status=delivered"');
     expect(html).not.toContain('aria-label="Status"');
   });
   it("searches across All when no stage is picked, so a just-reported issue can be found", async () => {

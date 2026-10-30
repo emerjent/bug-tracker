@@ -21,7 +21,7 @@ import { IdeasList, type IdeaListRow } from "@/components/ideas-list";
 import { isUnstructuredDraft } from "@/lib/ideas";
 import { workflowFor } from "@/lib/workflow";
 import { severityLabels } from "@/lib/labels";
-import { severities } from "@/lib/validations/issue";
+import { severities, statuses } from "@/lib/validations/issue";
 import { boundSearchTerm, escapeSearchQuery, toSingleQueryParam } from "@/lib/search";
 import {
   hasMatch,
