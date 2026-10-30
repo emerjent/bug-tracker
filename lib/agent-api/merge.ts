@@ -8,7 +8,7 @@ import { IssueApiError } from "@/lib/agent-api/issues";
 import { publish } from "@/lib/agent-api/events";
 import { isConfirmed } from "@/lib/agent-api/validation";
 import { award, awardDispatcher } from "@/lib/points/award";
-import { pointSourceKey, reviewerPointsAt } from "@/lib/points/rules";
+import { pointSourceKey, reviewerPointsAt, roundPoints } from "@/lib/points/rules";
 import {
   calculateReviewerPoints,
   calculateSolverPoints,
@@ -578,6 +578,29 @@ export async function acceptFix(
 
     const rewardConfig = await getProjectRewardConfig(tx, bug.projectId);
     if (solverUserId) {
+      // #655: Ensure at most one positive solver award per issue.
+      // If an issue is reopened and reassigned, negate the previous solver's
+      // award before awarding the new assignee.
+      const existingSolverAward = await tx.pointEntry.findFirst({
+        where: {
+          bugId: bug.id,
+          role: "solver",
+          points: { gt: 0 },
+        },
+        orderBy: { createdAt: "asc" },
+      });
+
+      if (existingSolverAward && existingSolverAward.userId !== solverUserId) {
+        await award(tx, {
+          tenantId: bug.tenantId,
+          userId: existingSolverAward.userId,
+          bugId: bug.id,
+          role: "solver",
+          points: -Math.abs(Number(existingSolverAward.points)),
+          sourceKey: `solver-correction:${bug.id}:${existingSolverAward.userId}`,
+        });
+      }
+
       await award(tx, {
         tenantId: bug.tenantId,
         userId: solverUserId,

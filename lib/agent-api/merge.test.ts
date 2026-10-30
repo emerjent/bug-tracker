@@ -23,7 +23,7 @@ const db = vi.hoisted(() => ({
   comment: { create: vi.fn() },
   testVerdict: { findMany: vi.fn() },
   issueValidation: { findMany: vi.fn() },
-  pointEntry: { createMany: vi.fn() },
+  pointEntry: { createMany: vi.fn(), findFirst: vi.fn() },
   agentAuditEvent: { create: vi.fn(), findMany: vi.fn() },
   agentEvent: { create: vi.fn() },
   webhookSubscription: { findMany: vi.fn() },
@@ -483,6 +483,44 @@ describe("acceptFix: a successful accept (#434)", () => {
       where: { bugId: "bug1", status: { in: ["active", "offered"] }, releasedAt: null },
       data: { status: "released", releasedAt: expect.any(Date), releaseReason: "resolved" },
     });
+  });
+
+  it("releases prior solver award when reassigning to a new assignee (#655)", async () => {
+    confirmWith("rob", "sam");
+    verdict("r1", "rob", "rob", PR, "linked-sha");
+    verdict("r2", "sam", "sam", PR, "linked-sha");
+    // Existing solver award for "oldUser"
+    db.pointEntry.findFirst.mockResolvedValue({
+      userId: "oldUser",
+      points: 750,
+      bugId: "bug1",
+      role: "solver",
+    });
+    db.bug.findFirst.mockResolvedValue(bugRow({
+      claims: [{ status: "active", releasedAt: null, agentId: "newAgent", beneficiaryUserId: "newUser", agent: { ownerUserId: "newUser" } }],
+    }));
+
+    expect(await acceptFix(merger("m1", "mo", "admin_merger"), "bug1", { client: defaultMockGhClient() })).toMatchObject({ status: 200, accepted: true });
+
+    const awards = db.pointEntry.createMany.mock.calls.map((call) => call[0].data[0]);
+
+    // Negative correction for old solver
+    const oldSolverAward = awards.find((a) => a.userId === "oldUser" && a.role === "solver");
+    expect(oldSolverAward).toBeDefined();
+    expect(oldSolverAward.points).toBeLessThan(0);
+    expect(oldSolverAward.sourceKey).toBe("solver-correction:bug1:oldUser");
+
+    // New solver award
+    const newSolverAward = awards.find((a) => a.userId === "newUser" && a.role === "solver");
+    expect(newSolverAward).toBeDefined();
+    expect(newSolverAward.points).toBeGreaterThan(0);
+    expect(newSolverAward.sourceKey).toBe("solver:bug1:newUser");
+
+    // Exactly 2 solver awards
+    expect(awards.filter((a) => a.role === "solver")).toHaveLength(2);
+
+    // Reset findFirst mock to avoid affecting other tests
+    db.pointEntry.findFirst.mockResolvedValue(undefined);
   });
 
   it("pays every good-to-merge reviewer, each less than the one before", async () => {
