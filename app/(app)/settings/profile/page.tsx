@@ -2,12 +2,18 @@ import "../settings-design.css";
 import Link from "next/link";
 import { DisplayNameForm } from "@/components/display-name-form";
 import { ProfileAvatarUpload } from "@/components/profile-avatar-upload";
+import { CopyLinkButton } from "@/components/copy-link-button";
 import { requireUser } from "@/lib/auth-helpers";
+import { prisma } from "@/lib/prisma";
+import { getOrCreateReferralCode, referralUrl, countReferrals } from "@/lib/referrals";
 
 export const metadata = { title: "Profile" };
 
 export default async function ProfilePage() {
   const user = await requireUser();
+  const referralCode = await getOrCreateReferralCode(prisma, user.id);
+  const referralLink = referralUrl(referralCode);
+  const referralCount = await countReferrals(prisma, user.id);
 
   return (
     <div className="profile-page settings-design mx-auto flex w-full flex-col gap-6 pb-10">
@@ -56,6 +62,26 @@ export default async function ProfilePage() {
           <p className="break-words text-sm text-zk-text2">{user.email}</p>
           <p className="text-xs text-zk-muted">Your sign-in email cannot be changed here.</p>
         </div>
+      </section>
+
+      <section className="flex flex-col gap-5 rounded-[20px] border border-zk-border bg-zk-surface p-6">
+        <div className="flex flex-col gap-1">
+          <h2 className="m-0 text-lg font-bold text-zk-text">Invite friends</h2>
+          <span className="text-[13px] text-zk-muted">
+            Share your personal link. When a friend signs up through it, they are
+            attributed to you. {referralCount > 0 ? `${referralCount} successful sign-up${referralCount === 1 ? "" : "s"} so far.` : ""}
+          </span>
+        </div>
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <code className="flex-1 break-all rounded-xl border border-zk-border bg-zk-chip px-3 py-2 text-sm text-zk-text">
+            {referralLink}
+          </code>
+          <CopyLinkButton url={referralLink} label="referral link" />
+        </div>
+        <p className="text-xs text-zk-muted">
+          Your code: <span className="font-mono">{referralCode}</span>. You cannot
+          refer yourself, and each friend is counted at most once.
+        </p>
       </section>
     </div>
   );

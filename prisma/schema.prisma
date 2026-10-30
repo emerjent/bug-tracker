@@ -255,6 +255,10 @@ model User {
   membershipChangesReceived MembershipChange[]      @relation("MembershipChangeTarget")
   shareLinksSent            TenantShareLink[]
   shareRedemptions          TenantShareRedemption[]
+  /// Stable code used in the user's personal referral link (#product-growth).
+  referralCode              String?                 @unique
+  referralsSent             Referral[]              @relation("ReferralsSent")
+  referralReceived          Referral?               @relation("ReferralsReceived")
   tenantJoinRequests        TenantJoinRequest[]     @relation("TenantJoinRequester")
   joinRequestsReviewed      TenantJoinRequest[]     @relation("TenantJoinReviewer")
   projectAuditEvents        ProjectAuditEvent[]
@@ -1734,6 +1738,21 @@ model TenantShareRedemption {
 
   @@unique([linkId, userId])
   @@index([userId])
+}
+
+/// A successful sign-up attributed to a user's referral link (#product-growth).
+/// One per invitee: a person can only be referred once.
+model Referral {
+  id        String   @id @default(cuid())
+  inviterId String
+  inviter   User     @relation("ReferralsSent", fields: [inviterId], references: [id], onDelete: Cascade)
+  inviteeId String   @unique
+  invitee   User     @relation("ReferralsReceived", fields: [inviteeId], references: [id], onDelete: Cascade)
+  code      String
+  createdAt DateTime @default(now())
+
+  @@index([inviterId])
+  @@index([code])
 }
 
 /// One create per agent per Idempotency-Key (#441).

@@ -15,9 +15,11 @@ const fieldClass =
 export function LoginForm({
   callbackUrl = "/dashboard",
   googleEnabled = false,
+  referralCode,
 }: {
   callbackUrl?: string;
   googleEnabled?: boolean;
+  referralCode?: string | null;
 }) {
   // Only show Google button if OAuth is actually configured
   const showGoogleButton = googleEnabled;
@@ -78,6 +80,7 @@ export function LoginForm({
         });
       }}
     >
+      {referralCode ? <input type="hidden" name="referralCode" value={referralCode} /> : null}
       {showGoogleButton ? (
         <>
           <GoogleSignInButtonInline
@@ -87,7 +90,7 @@ export function LoginForm({
               startTransition(async () => {
                 try {
                   // Keep the requested page, e.g. an issue from its 404 (#457).
-                  await googleSignInAction(callbackUrl);
+                  await googleSignInAction(callbackUrl, referralCode ?? undefined);
                 } catch (error) {
                   unstable_rethrow(error);
                   setError("Google sign-in failed. Please try again.");
