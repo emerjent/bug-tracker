@@ -43,12 +43,17 @@ function SubmitButton() {
 
 export function GoogleSignInButton({
   callbackUrl = "/dashboard",
+  referralCode,
 }: {
   callbackUrl?: string;
+  referralCode?: string | null;
 }) {
   return (
     <form action={googleSignInAction} className="w-full">
       <input type="hidden" name="callbackUrl" value={callbackUrl} />
+      {referralCode ? (
+        <input type="hidden" name="referralCode" value={referralCode} />
+      ) : null}
       <SubmitButton />
     </form>
   );

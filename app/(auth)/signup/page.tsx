@@ -8,10 +8,11 @@ import { safeCallbackUrl } from "@/lib/safe-callback-url";
 export default async function SignupPage({
   searchParams,
 }: {
-  searchParams: Promise<{ callbackUrl?: string }>;
+  searchParams: Promise<{ callbackUrl?: string; ref?: string }>;
 }) {
   const params = await searchParams;
   const callbackUrl = safeCallbackUrl(params.callbackUrl);
-  redirect(`/login?callbackUrl=${encodeURIComponent(callbackUrl)}`);
+  const ref = params.ref ? `&ref=${encodeURIComponent(params.ref)}` : "";
+  redirect(`/login?callbackUrl=${encodeURIComponent(callbackUrl)}${ref}`);
 }
 

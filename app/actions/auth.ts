@@ -34,6 +34,7 @@ import {
   PASSWORD_AUTH_DISABLED_MESSAGE,
 } from "@/lib/auth-mode";
 import { safeCallbackUrl } from "@/lib/safe-callback-url";
+import { normalizeReferralCode, REFERRAL_COOKIE_NAME, recordReferralSignup } from "@/lib/referrals";
 import {
   RATE_LIMIT_MESSAGE,
   consumeAuthRateLimit,
@@ -148,9 +149,18 @@ export async function signupAction(
   const passwordHash = await hash(password, 10);
   const callbackUrl = safeCallbackUrl(formData.get("callbackUrl"));
 
+  // Referral attribution may arrive via the form or the cookie set by /r/:code.
+  const cookieStore = await cookies();
+  const referralCode =
+    (typeof formData.get("referralCode") === "string"
+      ? (formData.get("referralCode") as string)
+      : null) ?? cookieStore.get(REFERRAL_COOKIE_NAME)?.value ?? null;
+
+  let createdUser: { id: string } | null = null;
   try {
-    await prisma.user.create({
+    createdUser = await prisma.user.create({
       data: { name, email, passwordHash },
+      select: { id: true },
     });
   } catch (error) {
     if (
@@ -160,6 +170,19 @@ export async function signupAction(
       return { error: SIGNUP_FAILED };
     }
     throw error;
+  }
+
+  if (createdUser) {
+    try {
+      await recordReferralSignup(prisma, {
+        inviteeId: createdUser.id,
+        code: referralCode,
+      });
+    } catch (error) {
+      logger.error("[signupAction] referral attribution failed:", error);
+    }
+    // Consume the cookie so it does not leak into a later, unrelated sign-up.
+    cookieStore.delete(REFERRAL_COOKIE_NAME);
   }
 
   try {
@@ -255,8 +278,10 @@ export async function switchActiveRoleAction(
 
 export async function googleSignInAction(
   callbackUrlOrFormData?: string | FormData,
+  referralCode?: string,
 ) {
   let target = "/dashboard";
+  let code: string | null = referralCode ?? null;
   if (typeof callbackUrlOrFormData === "string") {
     target = callbackUrlOrFormData;
   } else if (
@@ -266,6 +291,21 @@ export async function googleSignInAction(
   ) {
     const raw = callbackUrlOrFormData.get("callbackUrl");
     if (typeof raw === "string") target = raw;
+    const formCode = callbackUrlOrFormData.get("referralCode");
+    if (typeof formCode === "string") code = formCode;
+  }
+  // Persist the referral code across the OAuth round-trip so a successful
+  // sign-up can be attributed even though Google leaves our origin.
+  const normalized = normalizeReferralCode(code);
+  if (normalized) {
+    const cookieStore = await cookies();
+    cookieStore.set(REFERRAL_COOKIE_NAME, normalized, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      path: "/",
+      maxAge: 60 * 60 * 24 * 30,
+    });
   }
   const safeTarget = safeCallbackUrl(target);
   await signIn("google", { redirectTo: safeTarget });

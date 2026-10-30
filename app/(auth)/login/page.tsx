@@ -22,10 +22,12 @@ export default async function LoginPage({
     callbackUrl?: string;
     expired?: string;
     error?: string;
+    ref?: string;
   }>;
 }) {
   const params = await searchParams;
   const callbackUrl = safeCallbackUrl(params.callbackUrl);
+  const referralCode = params.ref ?? null;
   const googleConfigured = isGoogleOAuthConfigured();
   const passwordEnabled = isPasswordAuthEnabled();
 
@@ -67,9 +69,13 @@ export default async function LoginPage({
         ) : null}
 
         {passwordEnabled ? (
-          <LoginForm callbackUrl={callbackUrl} googleEnabled={googleConfigured} />
+          <LoginForm
+            callbackUrl={callbackUrl}
+            googleEnabled={googleConfigured}
+            referralCode={referralCode}
+          />
         ) : googleConfigured ? (
-          <GoogleSignInButton callbackUrl={callbackUrl} />
+          <GoogleSignInButton callbackUrl={callbackUrl} referralCode={referralCode} />
         ) : (
           <div className="rounded-xl bg-zk-warn-bg p-4 text-sm text-zk-warn-fg" role="alert">
             <p className="font-medium">Google sign-in is not configured.</p>

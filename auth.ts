@@ -14,6 +14,8 @@ import { TwoFactorInvalidError, TwoFactorRequiredError } from "@/lib/auth-errors
 import { isTwoFactorEnabled, verifySecondFactor } from "@/lib/two-factor";
 import { googleSignInBlockedByTwoFactor } from "@/lib/google-two-factor";
 import { acceptedSessionRefresh } from "@/lib/session-refresh";
+import { cookies } from "next/headers";
+import { recordReferralSignup, REFERRAL_COOKIE_NAME } from "@/lib/referrals";
 
 const googleClientId = cleanEnv(
   process.env.GOOGLE_CLIENT_ID || process.env.AUTH_GOOGLE_ID,
@@ -181,6 +183,19 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
               ? profile.email_verified
               : false;
 
+          // Remember whether this is a brand-new account so referral attribution
+          // only happens on sign-up, not on every subsequent sign-in (#product-growth).
+          let isNewGoogleUser = false;
+          try {
+            const prior = await prisma.user.findUnique({
+              where: { email },
+              select: { id: true },
+            });
+            isNewGoogleUser = !prior;
+          } catch (lookupError) {
+            console.error("[auth] Google user pre-lookup failed:", lookupError);
+          }
+
           let dbUser: GoogleAccount | null = null;
           let lastError: unknown;
           for (let attempt = 1; attempt <= 3; attempt++) {
@@ -200,6 +215,20 @@ export const { handlers, auth, signIn, signOut, unstable_update: updateSession }
             throw lastError instanceof Error
               ? lastError
               : new Error("Google sign-in could not save the user");
+          }
+
+          if (isNewGoogleUser) {
+            try {
+              const cookieStore = await cookies();
+              const code = cookieStore.get(REFERRAL_COOKIE_NAME)?.value;
+              await recordReferralSignup(prisma, {
+                inviteeId: dbUser.id,
+                code,
+              });
+              cookieStore.delete(REFERRAL_COOKIE_NAME);
+            } catch (referralError) {
+              console.error("[auth] referral attribution failed:", referralError);
+            }
           }
 
           token.email = email;
