@@ -3,13 +3,14 @@ import { LocalTime } from "@/components/local-time";
 import type { PointEntriesPage } from "@/lib/points/entries";
 import { formatPoints } from "@/lib/points/rules";
 
-export function PointsLedger({ page, profileId, from, to, error }: {
-  page: PointEntriesPage | null; profileId: string; from?: string; to?: string; error?: boolean;
+export function PointsLedger({ page, profileId, from, to, cursor, error }: {
+  page: PointEntriesPage | null; profileId: string; from?: string; to?: string; cursor?: string | null; error?: boolean;
 }) {
-  const query = new URLSearchParams();
-  if (from) query.set("from", from);
-  if (to) query.set("to", to);
-  if (page?.nextCursor) query.set("cursor", page.nextCursor);
+  const baseQuery = new URLSearchParams();
+  if (from) baseQuery.set("from", from);
+  if (to) baseQuery.set("to", to);
+  const olderQuery = new URLSearchParams(baseQuery);
+  if (page?.nextCursor) olderQuery.set("cursor", page.nextCursor);
   return (
     <section aria-labelledby="ledger-heading" className="rounded-[20px] border border-zk-border bg-zk-surface p-4 sm:p-5">
       <h2 id="ledger-heading" className="text-sm font-semibold text-zk-text">Points history</h2>
@@ -34,7 +35,10 @@ export function PointsLedger({ page, profileId, from, to, error }: {
           </table>
         </div>
       )}
-      {page?.nextCursor ? <Link className="mt-4 inline-block rounded text-sm text-zk-accent underline focus-visible:outline-2 focus-visible:outline-offset-2" href={`/users/${profileId}?${query}#ledger-heading`}>Older entries</Link> : null}
+      <nav className="mt-4 flex flex-wrap items-center gap-3" aria-label="Points history pagination">
+        {page?.nextCursor ? <Link className="rounded text-sm text-zk-accent underline focus-visible:outline-2 focus-visible:outline-offset-2" href={`/users/${profileId}?${olderQuery}#ledger-heading`}>Older entries</Link> : null}
+        {cursor ? <Link className="rounded text-sm text-zk-accent underline focus-visible:outline-2 focus-visible:outline-offset-2" href={`/users/${profileId}?${baseQuery}#ledger-heading`}>Newer entries</Link> : null}
+      </nav>
     </section>
   );
 }

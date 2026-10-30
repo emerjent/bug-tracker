@@ -184,7 +184,7 @@ export default async function ProfilePage({ params, searchParams }: ProfileProps
       ) : null}
 
       {tenantId && viewer.id === person.id ? (
-        <PointsLedger page={ledger} profileId={person.id} from={ledgerQuery.success ? ledgerQuery.data.from : undefined} to={ledgerQuery.success ? ledgerQuery.data.to : undefined} error={ledgerError} />
+        <PointsLedger page={ledger} profileId={person.id} from={ledgerQuery.success ? ledgerQuery.data.from : undefined} to={ledgerQuery.success ? ledgerQuery.data.to : undefined} cursor={ledgerQuery.success ? ledgerQuery.data.cursor : undefined} error={ledgerError} />
       ) : null}
 
       <section className="rounded-[20px] border border-zk-border bg-zk-surface p-4 sm:p-5" aria-labelledby="profile-agents-heading">
