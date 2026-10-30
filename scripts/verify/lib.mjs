@@ -55,30 +55,51 @@ export function isAlive(pid) {
 }
 
 /**
- * Stops a process and everything it started. Children are spawned in their
- * own group on POSIX (`detached`), so the whole group gets the signal; on
- * Windows `taskkill /T` walks the tree.
+ * Signals a process and everything it started, without waiting. Children are
+ * spawned in their own group on POSIX (`detached`), so the whole group gets
+ * the signal; on Windows `taskkill /T /F` walks the tree. Never block here
+ * waiting for the exit: on POSIX a killed child stays a zombie (and looks
+ * alive) until the event loop reaps it, so callers wait for its exit event.
  */
-export function killTree(pid) {
-  if (!pid || !isAlive(pid)) return;
+export function killTree(pid, signal = "SIGTERM") {
+  if (!pid) return;
   if (process.platform === "win32") {
     spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", timeout: 15_000 });
     return;
   }
-  for (const signal of ["SIGTERM", "SIGKILL"]) {
+  try {
+    process.kill(-pid, signal);
+  } catch {
     try {
-      process.kill(-pid, signal);
+      process.kill(pid, signal);
     } catch {
-      try {
-        process.kill(pid, signal);
-      } catch {
-        return;
-      }
+      // Already gone.
     }
-    const until = Date.now() + 3_000;
-    while (Date.now() < until && isAlive(pid)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-    if (!isAlive(pid)) return;
   }
+}
+
+/**
+ * Stops `child` and its tree: SIGTERM, then SIGKILL if it hasn't exited
+ * after `graceMs`. Resolves once it has exited, or after a last bound.
+ *
+ * @param {import("node:child_process").ChildProcess} child
+ */
+export function stopTree(child, graceMs = 3_000) {
+  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(escalate);
+      clearTimeout(giveUp);
+      resolve(undefined);
+    };
+    child.once("exit", done);
+    const escalate = setTimeout(() => killTree(child.pid, "SIGKILL"), graceMs);
+    const giveUp = setTimeout(() => {
+      child.off("exit", done);
+      resolve(undefined);
+    }, graceMs + 5_000);
+    killTree(child.pid, "SIGTERM");
+  });
 }
 
 /**
@@ -154,7 +175,7 @@ export function runPhase({ name, command, args = [], cwd, env = process.env, log
     const timer = setTimeout(() => {
       timedOut = true;
       log.write(`\n# timed out after ${(timeoutMs / 1000).toFixed(0)}s; stopping the process tree\n`);
-      killTree(child.pid);
+      void stopTree(child);
     }, timeoutMs);
     for (const stream of [child.stdout, child.stderr]) {
       stream.on("data", (chunk) => {
@@ -564,9 +585,9 @@ export function startServer({ command, args, cwd, env, logFile }) {
   return {
     child,
     logFile,
-    stop() {
-      killTree(child.pid);
-      return new Promise((resolve) => log.end(`\n# stopped ${new Date().toISOString()}\n`, resolve));
+    async stop() {
+      await stopTree(child);
+      await new Promise((resolve) => log.end(`\n# stopped ${new Date().toISOString()}\n`, resolve));
     },
   };
 }

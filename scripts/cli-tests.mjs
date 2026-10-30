@@ -132,7 +132,10 @@ async function main() {
   });
   timings.scenarios = run.seconds;
   const counts = readVitestReport(report, ROOT);
-  const summary = counts ? `${counts.files} files, ${counts.tests} tests: ${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped` : "no report";
+  // A file can fail outside any test (a hook, an import), so failing files are counted apart from failed tests.
+  const summary = counts
+    ? `${counts.files} files (${counts.failedFiles} failing), ${counts.tests} tests: ${counts.passed} passed, ${counts.failed} failed, ${counts.skipped} skipped`
+    : "no report";
   say(`${run.status} in ${duration(run.seconds)}: ${summary} (log: ${path.relative(ROOT, run.logFile)})`);
   if (timings.serverReady !== undefined) say(`waiting for the server took ${duration(timings.serverReady)}; the scenarios ${duration(timings.scenarios)}`);
   if (run.status === "passed") return 0;

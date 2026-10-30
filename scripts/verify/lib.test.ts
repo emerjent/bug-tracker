@@ -58,7 +58,8 @@ describe("phases", () => {
   it("reports a failing command as failed with its exit code, and keeps all of its output in the log", async () => {
     const dir = temp();
     const logFile = path.join(dir, "logs", "phase.log");
-    const script = "for (let i = 0; i < 20000; i++) { console.log('out ' + i); console.error('err ' + i); } process.exit(3);";
+    // exitCode, not process.exit(): on POSIX a pipe is written asynchronously, and exit() would drop the child's own unflushed output.
+    const script = "for (let i = 0; i < 20000; i++) { console.log('out ' + i); console.error('err ' + i); } process.exitCode = 3;";
     const result = await runPhase({ name: "x", command: node, args: ["-e", script], cwd: dir, logFile, timeoutMs: 60_000 });
     expect(result).toMatchObject({ status: "failed", exitCode: 3 });
     const log = readFileSync(logFile, "utf8");
