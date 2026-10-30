@@ -46,7 +46,8 @@ describe("llms.txt issue examples match the API (#407)", () => {
 
   it("drops the fields the route never returned", () => {
     const issue = exampleAfter("### GET /api/v1/issues/{id}").issue as Record<string, unknown>;
-    for (const gone of ["assignee", "labels", "claim", "commentCount"]) expect(issue).not.toHaveProperty(gone);
+    expect(issue).toHaveProperty("assignee");
+    for (const gone of ["labels", "claim", "commentCount"]) expect(issue).not.toHaveProperty(gone);
   });
 
   it("shows the create response as { idea, replayed }: every report is an idea (#idea-table)", () => {

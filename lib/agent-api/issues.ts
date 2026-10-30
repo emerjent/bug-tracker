@@ -150,6 +150,8 @@ export const issueSelect = {
   pullRequestUrl: true,
   pullRequestHeadSha: true,
   area: { select: { id: true, name: true, slug: true } },
+  // #491: include minimal assignee display object { id, name }
+  assignee: { select: { id: true, name: true } },
 } satisfies Prisma.BugSelect;
 
 /**
