@@ -447,7 +447,20 @@ export default async function SettingsPage(props: {
                   })}
                 </div>
               )}
-            </div>
+                  <section className={card}>
+                    <div className="flex flex-col gap-1">
+                      <h2 className="m-0 text-lg font-bold text-zk-text">Workspace configuration</h2>
+                      <span className="text-[13px] text-zk-muted">
+                        Manage platforms, milestones, and issue types shared across projects.
+                      </span>
+                    </div>
+                    <div className="flex flex-col gap-0.5">
+                      <LinkRow href="/settings/platforms" label="Platforms" />
+                      <LinkRow href="/settings/milestones" label="Milestones" />
+                      <LinkRow href="/settings/types" label="Issue types" />
+                    </div>
+                  </section>
+                </div>
           ) : null}
 
           {section === "agents" ? (
