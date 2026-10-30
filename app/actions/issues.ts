@@ -1739,8 +1739,10 @@ export async function deleteBugAction(bugId: string): Promise<ActionResult> {
           deletedAt: new Date(),
         },
       });
-      // Delete attachments associated with the issue to prevent storage bloat (#658)
-      await tx.attachment.deleteMany({ where: { bugId } });
+      // #596: do NOT delete attachments on soft delete — the issue can be
+      // restored, and its attachments should come back with it. The
+      // retention sweep (sweepOrphanedAttachments) purges attachments of
+      // deleted bugs only after a TTL, giving time to restore.
 
       // #621: release active and pending (`offered`) claims too, so a deleted
       // issue is not re-offered by the expiry sweep once its claim lapses.
@@ -1752,9 +1754,11 @@ export async function deleteBugAction(bugId: string): Promise<ActionResult> {
         where: { bugId, releasedAt: null, status: { in: ["active", "offered"] } },
         data: { status: "released", releasedAt: new Date(), releaseReason: "deleted" },
       });
-      for (const claim of claimsToRelease) {
-        await publish(tx, { tenantId, type: "claim.released", actorAgentId: claim.agentId, bugId,
-          payload: { claimId: claim.id, issueId: bugId, beneficiaryUserId: claim.beneficiaryUserId, reason: "deleted" } });
+      if (tenantId) {
+        for (const claim of claimsToRelease) {
+          await publish(tx, { tenantId, type: "claim.released", actorAgentId: claim.agentId, bugId,
+            payload: { claimId: claim.id, issueId: bugId, beneficiaryUserId: claim.beneficiaryUserId, reason: "deleted" } });
+        }
       }
 
       await publishWebEvent(tx, { bugId, type: "issue.deleted", actorUserId: user.id });

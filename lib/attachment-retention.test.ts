@@ -56,19 +56,20 @@ describe("sweepOrphanedAttachments (#658)", () => {
       .mockResolvedValueOnce({ count: 1 });
 
     const db = { attachment: { findMany, deleteMany } };
-    const { sweepOrphanedAttachments, ORPHANED_UPLOAD_TTL_MS } = await import("./attachment-retention");
+    const { sweepOrphanedAttachments, ORPHANED_UPLOAD_TTL_MS, DELETED_BUG_ATTACHMENT_TTL_MS } = await import("./attachment-retention");
 
     const result = await sweepOrphanedAttachments(db as never, { now, sweep: true });
     expect(result).toEqual({ unlinked: 2, deletedParents: 2, total: 4 });
 
     const cutoff = new Date(now.getTime() - ORPHANED_UPLOAD_TTL_MS);
+    const deletedBugCutoff = new Date(now.getTime() - DELETED_BUG_ATTACHMENT_TTL_MS);
     expect(findMany).toHaveBeenNthCalledWith(1, {
       where: { bugId: null, commentId: null, redesignProposalId: null, createdAt: { lt: cutoff } },
       select: { id: true },
       take: 500,
     });
     expect(findMany).toHaveBeenNthCalledWith(2, {
-      where: { bug: { isDeleted: true } },
+      where: { bug: { isDeleted: true, deletedAt: { lt: deletedBugCutoff } } },
       select: { id: true },
       take: 500,
     });
@@ -77,6 +78,21 @@ describe("sweepOrphanedAttachments (#658)", () => {
       select: { id: true },
       take: 500,
     });
+  });
+
+  it("does not purge attachments when all deleted bugs are within the TTL (#596)", async () => {
+    const findMany = vi.fn()
+      .mockResolvedValueOnce([]) // unlinked
+      .mockResolvedValueOnce([]) // all deleted bugs are within TTL, none returned
+      .mockResolvedValueOnce([]); // deleted comment
+    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+
+    const db = { attachment: { findMany, deleteMany } };
+    const { sweepOrphanedAttachments } = await import("./attachment-retention");
+
+    const result = await sweepOrphanedAttachments(db as never, { now, sweep: true });
+    expect(result).toEqual({ unlinked: 0, deletedParents: 0, total: 0 });
+    expect(deleteMany).not.toHaveBeenCalled();
   });
 
   it("skips execution when sweep is false", async () => {

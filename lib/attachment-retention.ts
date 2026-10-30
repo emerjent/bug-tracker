@@ -14,6 +14,11 @@ export const UNLINKED_UPLOAD_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Default TTL for orphaned uploads cleanup: 24 hours (#658). */
 export const ORPHANED_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 
+/** How long attachments of a soft-deleted bug are kept before the sweep
+ * purges them (#596). Matches the unlinked-upload TTL so restored issues
+ * get their attachments back within the restore window. */
+export const DELETED_BUG_ATTACHMENT_TTL_MS = UNLINKED_UPLOAD_TTL_MS;
+
 /** How often (1 in N uploads) the site-wide sweep also runs. */
 export const SITE_SWEEP_EVERY = 50;
 
@@ -110,9 +115,16 @@ export async function sweepOrphanedAttachments(
     unlinked = removed.count;
   }
 
-  // 2. Purge attachments whose parent bug was marked deleted
+  // 2. Purge attachments whose parent bug was marked deleted, but only after
+  // a TTL so a restored issue gets its attachments back (#596).
+  const deletedBugCutoff = new Date(now.getTime() - DELETED_BUG_ATTACHMENT_TTL_MS);
   const staleBugs = await db.attachment.findMany({
-    where: { bug: { isDeleted: true } },
+    where: {
+      bug: {
+        isDeleted: true,
+        deletedAt: { lt: deletedBugCutoff },
+      },
+    },
     select: { id: true },
     take: batchSize,
   });
