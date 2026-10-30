@@ -20,54 +20,32 @@ import { CopyLinkButton } from "@/components/copy-link-button";
 import { AttachmentList, type AttachmentView } from "@/components/attachment-list";
 import { useConfirm } from "@/components/ui/confirm-dialog";
 import { useToast } from "@/components/ui/toast";
+import { TimelineEventBadge } from "@/components/timeline-event-badge";
 
 type AttachmentsByComment = Record<string, AttachmentView[]>;
 
 type UserOption = { id: string; name: string };
 
-function CommentTypeBadge({ type, metadata }: { type?: CommentType | null; metadata?: unknown }) {
-  if (!type || type === "comment") return null;
-
+function CommentTypeBadge({ type, metadata, agent }: { type?: CommentType | null; metadata?: unknown; agent: boolean }) {
   const meta = typeof metadata === "object" && metadata !== null ? (metadata as Record<string, unknown>) : null;
-
   switch (type) {
     case "bid":
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-800 border border-amber-200">
-          <span>🏷️</span>
-          <span>Bid</span>
-          {typeof meta?.eta === "string" ? <span className="text-amber-700">· ETA: {meta.eta}</span> : null}
-        </span>
-      );
+      return <TimelineEventBadge kind="bid">Bid{typeof meta?.eta === "string" ? <span> ? ETA: {meta.eta}</span> : null}</TimelineEventBadge>;
     case "review":
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md bg-purple-50 px-2 py-0.5 text-xs font-medium text-purple-800 border border-purple-200">
-          <span>🔍</span>
-          <span>Review</span>
-          {typeof meta?.verdict === "string" ? <span className="text-purple-700">· {meta.verdict}</span> : null}
-        </span>
-      );
+      return <TimelineEventBadge kind="review">Review completed{typeof meta?.verdict === "string" ? <span> ? {meta.verdict}</span> : null}</TimelineEventBadge>;
     case "delivery":
       return (
-        <span className="inline-flex items-center gap-1 rounded-md bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-800 border border-emerald-200">
-          <span>📦</span>
-          <span>Delivery</span>
+        <TimelineEventBadge kind="delivery">
+          Solution submitted
           {typeof meta?.prUrl === "string" ? (
-            <a href={meta.prUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-emerald-900">
-              PR
-            </a>
+            <a href={meta.prUrl} target="_blank" rel="noopener noreferrer" className="rounded underline hover:text-emerald-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700">PR</a>
           ) : null}
-        </span>
+        </TimelineEventBadge>
       );
     case "request_to_merge":
-      return (
-        <span className="inline-flex items-center gap-1 rounded-md bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-800 border border-rose-200">
-          <span>🔀</span>
-          <span>Request to Merge</span>
-        </span>
-      );
+      return <TimelineEventBadge kind="merge">Request to Merge</TimelineEventBadge>;
     default:
-      return null;
+      return <TimelineEventBadge kind="comment">{agent ? "Agent comment" : "User comment"}</TimelineEventBadge>;
   }
 }
 
@@ -243,7 +221,7 @@ function CommentItem({
                   agentName={comment.agent?.name}
                   className="font-medium text-slate-700"
                 />
-                <CommentTypeBadge type={comment.type} metadata={comment.metadata} />
+                <CommentTypeBadge type={comment.type} metadata={comment.metadata} agent={Boolean(comment.agentId || comment.agent)} />
               </div>
               <span className="inline-flex items-center gap-1.5">
                 <a

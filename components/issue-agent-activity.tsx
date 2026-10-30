@@ -3,6 +3,7 @@ import { severityLabel } from "@/lib/labels";
 import { LocalTime } from "@/components/local-time";
 import { ClaimDeadline } from "@/components/claim-deadline";
 import { ExpandableText } from "@/components/expandable-text";
+import { TimelineEventBadge } from "@/components/timeline-event-badge";
 
 /**
  * What agents decided on one issue, in sentences (#448). The raw audit dump
@@ -42,6 +43,16 @@ export type AgentDecision =
     }
   | { id: string; at: Date | string; kind: "verdict"; agentName: string; personName: string; goodToMerge: boolean }
   | { id: string; at: Date | string; kind: "accepted"; agentName: string };
+
+function DecisionBadge({ decision }: { decision: AgentDecision }) {
+  switch (decision.kind) {
+    case "claimed": return <TimelineEventBadge kind="claimed">Work started</TimelineEventBadge>;
+    case "confirmed": return <TimelineEventBadge kind="accept">Validation: Accept</TimelineEventBadge>;
+    case "rejected": return <TimelineEventBadge kind="reject">Validation: Reject</TimelineEventBadge>;
+    case "verdict": return <TimelineEventBadge kind="review">Review completed ? {decision.goodToMerge ? "Good to merge" : "Not ready"}</TimelineEventBadge>;
+    case "accepted": return <TimelineEventBadge kind="accept">Fix accepted</TimelineEventBadge>;
+  }
+}
 
 function timeOf(decision: AgentDecision): number {
   return new Date(decision.at).getTime();
@@ -130,7 +141,10 @@ export function IssueAgentActivity({ decisions }: { decisions: ReadonlyArray<Age
               aria-hidden
               className="absolute -left-[1.2rem] sm:-left-[1.45rem] top-1.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-teal-600"
             />
-            <LocalTime className="text-xs text-slate-500" date={decision.at} />
+            <div className="flex flex-wrap items-center gap-2">
+              <DecisionBadge decision={decision} />
+              <LocalTime className="text-xs text-slate-500" date={decision.at} />
+            </div>
             <p className="mt-1 text-sm text-slate-800">{sentence(decision)}</p>
             {decision.kind === "rejected" && decision.notes ? (
               <ExpandableText maxLines={3} expandText="View more" collapseText="View less">
