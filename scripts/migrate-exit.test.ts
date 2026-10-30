@@ -251,7 +251,7 @@ case "$*" in
     n=$(grep -c "migrate deploy" "__CALLS__" || true)
     if [ "$n" -eq 1 ]; then
       echo "Error: P3009" >&2
-      echo 'The \`20261130000000_idea_verdicts\` migration started at 2026-10-29 13:00:33.229929 UTC failed' >&2
+      echo 'The \`${name}\` migration started at 2026-10-29 13:00:33.229929 UTC failed' >&2
       exit 1
     fi
     exit 0
