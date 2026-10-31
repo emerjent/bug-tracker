@@ -2,12 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   BUG_SORT_OPTIONS,
   DEFAULT_BUG_SORT,
+  DEFAULT_IDEA_SORT,
   bugSortDescriptions,
   bugSortLabels,
   compareBugsByLowestVotes,
   compareBugsByNewest,
   compareBugsByPopularity,
   getBugOrderBy,
+  getIdeaOrderBy,
   parseBugSort,
   sortBugs,
   sortBugsByPopularity,
@@ -293,6 +295,30 @@ describe("parseBugSort for the new options", () => {
 
   it("still defaults to importance for anything unknown", () => {
     expect(parseBugSort("sideways")).toBe("importance");
+  });
+});
+
+describe("the Ideas list order (#719)", () => {
+  it("opens newest first, so a new idea with no votes is at the top", () => {
+    expect(DEFAULT_IDEA_SORT).toBe("newest");
+    expect(getIdeaOrderBy(parseBugSort(undefined, DEFAULT_IDEA_SORT))).toEqual([
+      { createdAt: "desc" },
+      { id: "desc" },
+    ]);
+  });
+
+  it("still follows an explicit sort, reading importance as the idea's score", () => {
+    expect(getIdeaOrderBy(parseBugSort("importance", DEFAULT_IDEA_SORT))).toEqual([
+      { score: "desc" },
+      { createdAt: "desc" },
+      { id: "desc" },
+    ]);
+    expect(getIdeaOrderBy("least_important")[0]).toEqual({ score: "asc" });
+    expect(getIdeaOrderBy("recently_updated")[0]).toEqual({ updatedAt: "desc" });
+  });
+
+  it("leaves the issues default at importance", () => {
+    expect(parseBugSort(undefined)).toBe("importance");
   });
 });
 
