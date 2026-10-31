@@ -49,8 +49,10 @@ import { loadMilestoneSummaries } from "@/lib/milestone-stats";
 import { MilestoneProgressBar } from "@/components/milestone-progress";
 import { MilestoneDue } from "@/components/milestone-due";
 import {
+  DEFAULT_IDEA_SORT,
   bugSortDescriptions,
   getBugOrderBy,
+  getIdeaOrderBy,
   parseBugSort,
 } from "@/lib/issues-sort";
 import { canDeleteTicket } from "@/lib/ticket-deletion";
@@ -99,7 +101,7 @@ const REJECTED_IDEAS_STATUS = "rejected_ideas";
 /** The filters under the Ideas tab: new ideas (no `?ideas=`), or `?ideas=drafts`. */
 const IDEAS_PARAM = "ideas";
 type IdeasView = "new" | "drafts" | "rejected";
-/** Most ideas a list shows, highest score first. */
+/** Most ideas a list shows, in the chosen sort (newest first by default). */
 const IDEAS_LIMIT = 100;
 
 /** `?status=rejected`: someone's confirmation entry rejected the issue (#1122, #issue-confirmations). */
@@ -239,7 +241,6 @@ export default async function BugsPage({
   // Workspace-wide view (dashboard links). Absent → unchanged project scope.
   const allProjects = showsAllProjects(params[PROJECT_ALL_PARAM]);
 
-  const currentSort = parseBugSort(sortParam, defaultSortFor(mineFilter));
   const isWatchingView = mineFilter === "watching" && !!userId;
   // #285: duplicates are hidden unless asked for, and the count says so.
   const showDuplicates = parseShowDuplicates(params[DUPLICATES_PARAM]);
@@ -318,6 +319,8 @@ export default async function BugsPage({
             : "new";
   const isIdeasView = ideasView !== null;
   if (isIdeasView) where.id = { in: [] };
+  // #719: Ideas open newest first; an explicit ?sort= still wins.
+  const currentSort = parseBugSort(sortParam, isIdeasView ? DEFAULT_IDEA_SORT : defaultSortFor(mineFilter));
   if (statusParam === REJECTED_STATUS && !isDeletedView) {
     where.confirmations = REJECTED_WHERE;
   }
@@ -601,7 +604,7 @@ export default async function BugsPage({
     ? await loadOrEmpty("ideas list", async () => {
         const rows = await prisma.idea.findMany({
           where: ideasView === "drafts" ? { ...ideaWhere, id: { in: draftIds } } : ideasView === "rejected" ? rejectedIdeaWhere : ideaWhere,
-          orderBy: [{ score: "desc" }, { createdAt: "desc" }, { id: "desc" }],
+          orderBy: getIdeaOrderBy(currentSort),
           take: IDEAS_LIMIT,
           select: {
             id: true, number: true, title: true, score: true, projectId: true, createdAt: true,

@@ -11,6 +11,12 @@ export type BugSortOption = (typeof BUG_SORT_OPTIONS)[number];
 /** #importance: upvotes are now Importance; the most important issues come first. */
 export const DEFAULT_BUG_SORT: BugSortOption = "importance";
 
+/**
+ * #719: the Ideas list opens newest first. A new idea starts with no votes, so
+ * sorting by score hides it below older ones while it still needs verdicts.
+ */
+export const DEFAULT_IDEA_SORT: BugSortOption = "newest";
+
 export const bugSortLabels: Record<BugSortOption, string> = {
   newest: "Newest",
   recently_updated: "Recently Updated",
@@ -95,6 +101,20 @@ export function getBugOrderBy(
   return boostFirst
     ? [{ isBoosted: "desc" }, { boostedAt: "desc" }, ...baseOrder]
     : baseOrder;
+}
+
+/** The Ideas list's order for a sort choice; an idea's importance is its score. */
+export function getIdeaOrderBy(sort: BugSortOption): Prisma.IdeaOrderByWithRelationInput[] {
+  switch (sort) {
+    case "newest":
+      return [{ createdAt: "desc" }, { id: "desc" }];
+    case "recently_updated":
+      return [{ updatedAt: "desc" }, { id: "desc" }];
+    case "importance":
+      return [{ score: "desc" }, { createdAt: "desc" }, { id: "desc" }];
+    case "least_important":
+      return [{ score: "asc" }, { createdAt: "desc" }, { id: "desc" }];
+  }
 }
 
 export function compareBoosted<
