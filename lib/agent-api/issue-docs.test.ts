@@ -27,7 +27,7 @@ function exampleAfter(heading: string, marker = ""): Record<string, unknown> {
 }
 
 /** Added by `readAgentIssue` on top of `issueSelect`. */
-const READ_EXTRAS = ["comments", "attachments", "validations", "_count", "confirmed", "stage"];
+const READ_EXTRAS = ["comments", "attachments", "confirmations", "_count", "confirmed", "holder"];
 /** What the create answers with (#idea-table): `ideaJson` swaps `issue` for its id and number, and adds the gate. */
 const IDEA_FIELDS = [
   ...Object.keys(ideaSelect).filter((key) => key !== "issue"),
@@ -39,7 +39,9 @@ describe("llms.txt issue examples match the API (#407)", () => {
     const example = exampleAfter("### GET /api/v1/issues/{id}");
     expect(Object.keys(example)).toEqual(["issue"]);
     const keys = Object.keys(example.issue as object).sort();
-    expect(keys).toEqual([...Object.keys(issueSelect), ...READ_EXTRAS].sort());
+    // `voteCount` is read and sent as `importance` (#importance).
+    const fields = Object.keys(issueSelect).map((key) => (key === "voteCount" ? "importance" : key));
+    expect(keys).toEqual([...fields, ...READ_EXTRAS].sort());
   });
 
   it("drops the fields the route never returned", () => {

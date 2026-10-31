@@ -14,7 +14,7 @@ const db = vi.hoisted(() => ({
 const isConfirmed = vi.hoisted(() => vi.fn());
 const notifyClaimOffered = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/prisma", () => ({ prisma: db }));
-vi.mock("@/lib/agent-api/validation", () => ({ isConfirmed }));
+vi.mock("@/lib/agent-api/confirmations", () => ({ isConfirmed }));
 vi.mock("@/lib/agent-notifications", () => ({ notifyClaimOffered }));
 vi.mock("@/lib/redesigns", () => ({ assertRedesignOpen: vi.fn() }));
 
@@ -51,7 +51,9 @@ describe("an agent gives work back (#547)", () => {
 
     const result = await releaseClaim(agent, "p", "bug1", "Not my area");
 
-    expect(result).toMatchObject({ claimId: "claim-1", reason: "declined", reopened: false, reofferedTo: null });
+    expect(result).toMatchObject({ claimId: "claim-1", reason: "declined", reopened: false });
+    expect(result).not.toHaveProperty("reofferedTo");
+    expect(db.issueClaim.create).not.toHaveBeenCalled();
     expect(db.issueClaim.update).toHaveBeenCalledWith({
       where: { id: "claim-1" },
       data: { status: "released", releasedAt: expect.any(Date), releaseReason: "declined" },
@@ -74,6 +76,19 @@ describe("an agent gives work back (#547)", () => {
     expect(db.bugActivity.createMany).toHaveBeenCalled();
   });
 
+  it("leaves a delivered fix where it got to: the issue stays In progress (#one-status)", async () => {
+    db.issueClaim.findFirst.mockResolvedValue(claim("active"));
+    db.bug.findFirstOrThrow.mockResolvedValue({
+      id: "bug1", title: "T", status: "in_progress", assigneeId: "ada", projectId: "p", pullRequestUrl: "https://github.com/o/r/pull/1",
+    });
+
+    const result = await releaseClaim(agent, "p", "bug1");
+
+    expect(result.reopened).toBe(false);
+    expect(db.bug.update).not.toHaveBeenCalled();
+    expect(isConfirmed).not.toHaveBeenCalled();
+  });
+
   it("leaves a reassigned or resolved issue alone", async () => {
     db.issueClaim.findFirst.mockResolvedValue(claim("active"));
     db.bug.findFirstOrThrow.mockResolvedValue({ id: "bug1", title: "T", status: "resolved", assigneeId: "ada", projectId: "p" });
@@ -85,7 +100,7 @@ describe("an agent gives work back (#547)", () => {
     expect(isConfirmed).not.toHaveBeenCalled();
   });
 
-  it("offers the issue to someone else, never back to the same person", async () => {
+  it("reopens the issue for bids and offers it to nobody, even with another eligible person (#bids-only-offers)", async () => {
     db.$queryRaw.mockResolvedValueOnce([{ id: "bug1" }]).mockResolvedValueOnce([{ id: "bob" }]);
     db.issueClaim.findFirst.mockResolvedValueOnce(claim("active")).mockResolvedValueOnce(null);
     db.bug.findFirstOrThrow.mockResolvedValue({ id: "bug1", title: "T", status: "in_progress", assigneeId: "ada", projectId: "p" });
@@ -98,9 +113,11 @@ describe("an agent gives work back (#547)", () => {
 
     const result = await releaseClaim(agent, "p", "bug1");
 
-    expect(result.reofferedTo).toBe("bob");
-    expect(db.issueClaim.create.mock.calls[0][0].data).toMatchObject({ beneficiaryUserId: "bob", agentId: "agent-bob", status: "offered" });
-    expect(notifyClaimOffered).toHaveBeenCalledWith(expect.objectContaining({ beneficiaryUserId: "bob" }));
+    expect(result).toMatchObject({ reopened: true });
+    expect(result).not.toHaveProperty("reofferedTo");
+    expect(db.bug.update).toHaveBeenCalledWith({ where: { id: "bug1" }, data: { assigneeId: null, status: "open" } });
+    expect(db.issueClaim.create).not.toHaveBeenCalled();
+    expect(notifyClaimOffered).not.toHaveBeenCalled();
   });
 
   it("is 409 when the agent holds nothing on the issue", async () => {

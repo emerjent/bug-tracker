@@ -12,6 +12,16 @@ import { REVIEW_OFFER_TTL_MS } from "@/lib/agent-api/review-offer";
 import { MAX_IDEA_VOTES } from "@/lib/agent-api/idea-verdicts";
 import { listJobs } from "@/lib/jobs/create";
 import { workflowFor } from "@/lib/workflow";
+import { ideaVotes, isBadIdea } from "@/lib/idea-rejection";
+import { staleHold, type StaleHold } from "@/lib/agent-api/stale-hold";
+import { abandonTally, senseCheck } from "@/lib/agent-api/abandon";
+
+/** Why a hold is stale, in the work item's words (#reclaim). */
+const RECLAIM_WHY: Record<StaleHold["kind"], string> = {
+  offer_expired: "Its offer was not accepted within the project's offer window.",
+  overdue: "Its work was not delivered by the deadline.",
+  silent: "Its agent stopped checking in and has delivered nothing.",
+};
 import { IDEA_CONTRIBUTION_POINTS } from "@/lib/points/rules";
 import { absoluteUrl } from "@/lib/site-url";
 import { ideaPath, issuePath } from "@/lib/issue-ref";
@@ -46,9 +56,14 @@ export type WorkKind =
   | "confirm_issue"
   | "test_fix"
   | "ready_issue"
-  | "dispatch"
+  | "review_bid"
+  | "award_bid"
   | "research_job"
   | "convert_idea"
+  | "reject_idea"
+  | "reclaim_issue"
+  | "sense_check"
+  | "close_issue"
   | "accept_fix"
   | "merge_fix";
 
@@ -101,18 +116,37 @@ export type WorkFeed = {
 /** How each kind of class-gated work reads in a sentence, for one item and for several. */
 const WAITING_WORDS: Partial<Record<WorkKind, [string, string]>> = {
   convert_idea: ["idea to convert to an issue", "ideas to convert to issues"],
+  reject_idea: ["idea to reject", "ideas to reject"],
   accept_fix: ["tested fix to accept or reject", "tested fixes to accept or reject"],
-  dispatch: ["dispatch to hand out ready issues", "dispatches to hand out ready issues"],
+  award_bid: ["issue with bids to award", "issues with bids to award"],
+  close_issue: ["issue to close as superseded", "issues to close as superseded"],
   merge_fix: ["accepted fix to merge", "accepted fixes to merge"],
 };
 
 type IssueRef = { id: string; number: number; title: string };
 
+/** One open bid, with who it is from and its votes (#bid-votes). */
+type OpenBid = {
+  id: string;
+  issue: IssueRef;
+  agentName: string;
+  /** The bid's owner (its beneficiary) and the bidding agent's owner. */
+  ownerIds: string[];
+  /** The beneficiary's name, for whom it bids. */
+  by: string;
+  summary: string;
+  votes: number;
+  /** Who already voted for it. */
+  voters: string[];
+  createdAt: Date;
+};
+
 /** Who an issue belongs to and who already worked on it, for the per-agent filter. */
 type IssueFacts = ReviewedBug & {
   createdByAgentId: string | null;
   pullRequestUrl: string | null;
-  validatorOwners: { kind: string; ownerUserId: string; onBehalfOfUserId: string }[];
+  /** Who already gave a confirmation entry that still stands (after the latest edit, not undone). */
+  confirmerOwners: string[];
   testerOwners: { ownerUserId: string; pullRequestUrl: string | null }[];
 };
 
@@ -122,23 +156,33 @@ type IdeaFacts = ReviewedBug & {
   verdictOwners: string[];
 };
 
-/** What a converted issue still needs before it is ready (#idea-verdicts). */
-type ConfirmNeed = "validation" | "duplicate_check";
-
 export type ProjectWork = {
   tenantId: string;
   project: { id: string; slug: string; name: string };
-  /** Open ideas, with their verdict score. */
+  /** Open ideas still short of the threshold, with their verdict score (#727). */
   ideas: (IssueRef & { score: number })[];
   /** Open ideas at or past the project's threshold, waiting for a manager agent to convert them. */
   toConvert: (IssueRef & { score: number })[];
+  /** Bad open ideas a manager agent is advised to reject (lib/idea-rejection.ts). */
+  toReject: (IssueRef & { totalVotes: number; goodVotes: number })[];
+  /** Issues held by a stale offer or undelivered work, to take back to Open (#reclaim). */
+  toReclaim: (IssueRef & { reason: StaleHold["kind"] })[];
+  /** In-progress work with no update for the project's sense-check window (#abandon). */
+  toSenseCheck: (IssueRef & { votes: number; threshold: number; holderOwners: string[]; voters: string[]; since: Date | null })[];
+  /** Issues whose superseded suggestions reached the project's closeThreshold, for a manager agent to close (#close-superseded). */
+  toClose: (IssueRef & { votes: number; threshold: number; suggestions: number; summaries: string[] })[];
   /** Converted issues still being confirmed. */
-  toConfirm: (IssueRef & { needs: ConfirmNeed[] })[];
+  toConfirm: (IssueRef & { confirmations: number; needed: number })[];
   ideaThreshold: number;
   tests: (IssueRef & { pullRequestUrl: string | null })[];
-  ready: (IssueRef & { voteCount: number; severity: string })[];
+  /** `importance` is the issue's importance (#importance). */
+  ready: (IssueRef & { importance: number })[];
+  /** Open bids on Open issues, for other agents to vote on (#bid-votes). */
+  bids: OpenBid[];
+  /** Open issues with open bids and nobody holding them, for a manager agent to award one (#bids-only-offers). */
+  toAward: (IssueRef & { bids: OpenBid[] })[];
   toAccept: IssueRef[];
-  toMerge: (IssueRef & { reviewStatus: string | null })[];
+  toMerge: IssueRef[];
   jobs: { id: string; brief: string; pointsPerAccepted: number; open: number }[];
   facts: Map<string, IssueFacts>;
   ideaFacts: Map<string, IdeaFacts>;
@@ -188,14 +232,14 @@ async function buildProjectWork(tenantId: string, project: { id: string; slug: s
   // One read decides every converted issue's stage: which still require
   // confirmation, and for what, and which are ready (#714).
   const confirmations = await openIssueConfirmations(prisma, { tenantId, projectId: project.id });
-  const [tests, ready, toAccept, toMerge, ideas, jobs, workflow] = await Promise.all([
+  const workflow = await workflowFor(project.id);
+  const [tests, ready, toAccept, toMerge, ideas, jobs] = await Promise.all([
     findReviewableIssues(caller, project.id, "test", PER_KIND_LIMIT),
     findClaimableIssues(caller, project.id, PER_KIND_LIMIT, confirmations),
-    findReadyToMergeIssues(caller, project.id, PER_KIND_LIMIT, "submitted"),
+    findReadyToMergeIssues(caller, project.id, PER_KIND_LIMIT, "done"),
     findReadyToMergeIssues(caller, project.id, PER_KIND_LIMIT, "ready_to_merge"),
-    openIdeas(tenantId, project.id),
+    openIdeas(tenantId, project.id, workflow.ideaThreshold),
     openJobs(tenantId, project.id),
-    workflowFor(project.id),
   ]);
 
   // Issues that require confirmation: the reviews they still lack, oldest first.
@@ -208,27 +252,38 @@ async function buildProjectWork(tenantId: string, project: { id: string; slug: s
       select: { id: true, number: true, title: true },
     })
     : [];
-  const toConfirm = confirmingRows.map((bug): IssueRef & { needs: ConfirmNeed[] } => {
+  const toConfirm = confirmingRows.map((bug) => {
     const confirmation = confirmations.get(bug.id)!;
-    const needs: ConfirmNeed[] = [];
-    if (confirmation.accepts < confirmation.needed) needs.push("validation");
-    if (!confirmation.triageCleared) needs.push("duplicate_check");
-    return { ...bug, needs };
+    return { ...bug, confirmations: confirmation.accepts, needed: confirmation.needed };
   });
 
-  const toConvert = await convertibleIdeas(tenantId, project.id, workflow.ideaThreshold);
+  const [toConvert, toReject, toReclaim, toSenseCheck, toClose, bids] = await Promise.all([
+    convertibleIdeas(tenantId, project.id, workflow.ideaThreshold),
+    rejectableIdeas(tenantId, project.id),
+    staleIssues(tenantId, project.id),
+    senseChecks(tenantId, project.id),
+    closableIssues(tenantId, project.id, workflow.closeThreshold),
+    openBids(tenantId, project.id),
+  ]);
+  const toAward = await awardableIssues(bids, workflow.offerWindowSeconds);
   const ids = new Set([...toConfirm.map((i) => i.id), ...tests.map((t) => t.id), ...toAccept.map((t) => t.id), ...toMerge.map((t) => t.id)]);
   return {
     tenantId,
     project,
     ideas,
     toConvert,
+    toReject,
+    toReclaim,
+    toSenseCheck,
+    toClose,
     toConfirm,
     ideaThreshold: workflow.ideaThreshold,
     tests: tests.map((t) => ({ id: t.id, number: t.number, title: t.title, pullRequestUrl: t.pullRequestUrl ?? null })),
-    ready: ready.map((r) => ({ id: r.id, number: r.number, title: r.title, voteCount: r.voteCount, severity: r.severity })),
+    ready: ready.map((r) => ({ id: r.id, number: r.number, title: r.title, importance: r.voteCount })),
+    bids,
+    toAward,
     toAccept: toAccept.map((t) => ({ id: t.id, number: t.number, title: t.title })),
-    toMerge: toMerge.map((t) => ({ id: t.id, number: t.number, title: t.title, reviewStatus: t.reviewStatus })),
+    toMerge: toMerge.map((t) => ({ id: t.id, number: t.number, title: t.title })),
     jobs,
     facts: await loadFacts([...ids]),
     ideaFacts: await loadIdeaFacts(ideas.map((idea) => idea.id)),
@@ -236,10 +291,14 @@ async function buildProjectWork(tenantId: string, project: { id: string; slug: s
   };
 }
 
-/** Open ideas, highest score first so the ones nearest conversion lead. */
-async function openIdeas(tenantId: string, projectId: string): Promise<ProjectWork["ideas"]> {
+/**
+ * Open ideas still short of the threshold, highest score first so the ones
+ * nearest conversion lead. An idea at the threshold has its verdicts (#727):
+ * it waits in `toConvert` for a manager instead.
+ */
+async function openIdeas(tenantId: string, projectId: string, threshold: number): Promise<ProjectWork["ideas"]> {
   return prisma.idea.findMany({
-    where: { tenantId, projectId, isDeleted: false, status: "open" },
+    where: { tenantId, projectId, isDeleted: false, status: "open", score: { lt: threshold } },
     orderBy: [{ score: "desc" }, { createdAt: "asc" }],
     take: PER_KIND_LIMIT,
     select: { id: true, number: true, title: true, score: true },
@@ -253,6 +312,163 @@ async function convertibleIdeas(tenantId: string, projectId: string, threshold: 
     orderBy: [{ score: "desc" }, { createdAt: "asc" }],
     take: CONVERT_LIMIT,
     select: { id: true, number: true, title: true, score: true },
+  });
+}
+
+/** Open ideas a manager agent may reject, the most voted first. */
+/** Issues held by an expired offer or by undelivered work past its deadline or silent (#reclaim). */
+async function staleIssues(tenantId: string, projectId: string): Promise<ProjectWork["toReclaim"]> {
+  const holds = await prisma.issueClaim.findMany({
+    where: { releasedAt: null, status: { in: ["offered", "active"] }, bug: { tenantId, projectId, isDeleted: false, status: { in: ["open", "in_progress"] } } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: 50,
+    select: { bug: { select: { id: true, number: true, title: true } } },
+  });
+  const seen = new Set<string>();
+  const stale: ProjectWork["toReclaim"] = [];
+  for (const { bug } of holds) {
+    if (seen.has(bug.id) || stale.length >= PER_KIND_LIMIT) continue;
+    seen.add(bug.id);
+    const hold = await staleHold(bug.id);
+    if (hold) stale.push({ ...bug, reason: hold.kind });
+  }
+  return stale;
+}
+
+/** In-progress work due a sense check, with its Abandoned votes so far (#abandon). */
+async function senseChecks(tenantId: string, projectId: string): Promise<ProjectWork["toSenseCheck"]> {
+  const held = await prisma.issueClaim.findMany({
+    where: { status: "active", releasedAt: null, bug: { tenantId, projectId, isDeleted: false, status: "in_progress" } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: 50,
+    select: { beneficiaryUserId: true, agent: { select: { ownerUserId: true } }, bug: { select: { id: true, number: true, title: true } } },
+  });
+  const due: ProjectWork["toSenseCheck"] = [];
+  for (const claim of held) {
+    if (due.length >= PER_KIND_LIMIT) break;
+    const check = await senseCheck(claim.bug.id);
+    if (!check) continue;
+    const { voters } = await abandonTally(check.claimId);
+    due.push({
+      ...claim.bug,
+      votes: check.votes,
+      threshold: check.threshold,
+      holderOwners: [claim.beneficiaryUserId, claim.agent.ownerUserId],
+      voters,
+      since: check.lastUpdate,
+    });
+  }
+  return due;
+}
+
+/** Close suggestions read for the feed: enough for every issue at the threshold to reach the managers. */
+const CLOSE_SUGGESTION_LIMIT = 500;
+
+/** Issues not closed or live whose superseded suggestions reach the threshold, oldest suggestion first (#close-superseded). */
+async function closableIssues(tenantId: string, projectId: string, threshold: number): Promise<ProjectWork["toClose"]> {
+  const rows = await prisma.closeSuggestion.findMany({
+    where: { reason: "superseded", bug: { tenantId, projectId, isDeleted: false, status: { notIn: ["closed", "resolved"] } } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: CLOSE_SUGGESTION_LIMIT,
+    select: { votes: true, summary: true, bug: { select: { id: true, number: true, title: true } } },
+  });
+  const byIssue = new Map<string, ProjectWork["toClose"][number]>();
+  for (const row of rows) {
+    const entry = byIssue.get(row.bug.id) ?? { ...row.bug, votes: 0, threshold, suggestions: 0, summaries: [] };
+    entry.votes += row.votes;
+    entry.suggestions += 1;
+    if (entry.summaries.length < 2) entry.summaries.push(row.summary);
+    byIssue.set(row.bug.id, entry);
+  }
+  return [...byIssue.values()].filter((entry) => entry.votes >= threshold).slice(0, PER_KIND_LIMIT);
+}
+
+/** Bids read for the feed: enough for every Open issue's bids to reach the award list. */
+const BID_LIMIT = 200;
+
+/** Open bids (not awarded, not withdrawn, from agents not revoked) on Open issues, oldest first (#bid-votes). */
+async function openBids(tenantId: string, projectId: string): Promise<OpenBid[]> {
+  const rows = await prisma.issueBid.findMany({
+    where: { withdrawnAt: null, awardedAt: null, agent: { revokedAt: null }, bug: { tenantId, projectId, isDeleted: false, status: "open" } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: BID_LIMIT,
+    select: {
+      id: true,
+      beneficiaryUserId: true,
+      summary: true,
+      createdAt: true,
+      agent: { select: { name: true, ownerUserId: true } },
+      beneficiary: { select: { name: true } },
+      bug: { select: { id: true, number: true, title: true } },
+      votes: { select: { onBehalfOfUserId: true } },
+    },
+  });
+  return rows.map((row) => ({
+    id: row.id,
+    issue: row.bug,
+    agentName: row.agent.name,
+    ownerIds: [row.beneficiaryUserId, row.agent.ownerUserId],
+    by: row.beneficiary.name ?? "A member",
+    summary: row.summary,
+    votes: row.votes.length,
+    voters: row.votes.map((vote) => vote.onBehalfOfUserId),
+    createdAt: row.createdAt,
+  }));
+}
+
+/**
+ * Open issues with open bids that nobody holds (no active claim and no offer
+ * still inside the project's window), oldest first: a manager agent awards
+ * one of their bids (#bids-only-offers). An Open issue is confirmed.
+ */
+async function awardableIssues(bids: OpenBid[], offerWindowSeconds: number): Promise<ProjectWork["toAward"]> {
+  if (!bids.length) return [];
+  const byIssue = new Map<string, IssueRef & { bids: OpenBid[] }>();
+  for (const bid of bids) {
+    const entry: IssueRef & { bids: OpenBid[] } = byIssue.get(bid.issue.id) ?? { ...bid.issue, bids: [] };
+    entry.bids.push(bid);
+    byIssue.set(bid.issue.id, entry);
+  }
+  const offerCutoff = new Date(Date.now() - offerWindowSeconds * 1000);
+  const held = await prisma.issueClaim.findMany({
+    where: {
+      bugId: { in: [...byIssue.keys()] },
+      releasedAt: null,
+      OR: [{ status: "active" }, { status: "offered", offeredAt: { gt: offerCutoff } }],
+    },
+    select: { bugId: true },
+  });
+  const heldIds = new Set(held.map((claim) => claim.bugId));
+  return [...byIssue.values()].filter((issue) => !heldIds.has(issue.id)).slice(0, PER_KIND_LIMIT);
+}
+
+async function rejectableIdeas(tenantId: string, projectId: string): Promise<ProjectWork["toReject"]> {
+  const { ideaThreshold } = await workflowFor(projectId);
+  const sums = await prisma.ideaVerdict.groupBy({
+    by: ["ideaId", "opinion"],
+    where: { idea: { tenantId, projectId, isDeleted: false, status: "open" } },
+    _sum: { votes: true },
+  });
+  const votesByIdea = new Map<string, { opinion: string; votes: number }[]>();
+  for (const row of sums) {
+    const list = votesByIdea.get(row.ideaId) ?? [];
+    list.push({ opinion: row.opinion, votes: row._sum.votes ?? 0 });
+    votesByIdea.set(row.ideaId, list);
+  }
+  const rejectable = [...votesByIdea]
+    .map(([id, rows]) => ({ id, votes: ideaVotes(rows) }))
+    .filter(({ votes }) => isBadIdea(votes, ideaThreshold))
+    .sort((a, b) => b.votes.total - a.votes.total)
+    .slice(0, CONVERT_LIMIT);
+  if (!rejectable.length) return [];
+  const ideas = await prisma.idea.findMany({
+    where: { id: { in: rejectable.map((idea) => idea.id) } },
+    select: { id: true, number: true, title: true },
+  });
+  const byId = new Map(ideas.map((idea) => [idea.id, idea]));
+  return rejectable.flatMap(({ id, votes }) => {
+    const idea = byId.get(id);
+    return idea ? [{ ...idea, totalVotes: votes.total, goodVotes: votes.good }] : [];
   });
 }
 
@@ -307,7 +523,8 @@ async function loadFacts(ids: string[]): Promise<Map<string, IssueFacts>> {
       pullRequestUrl: true,
       createdByAgent: { select: { ownerUserId: true } },
       claims: { select: { status: true, releasedAt: true, beneficiaryUserId: true, dispatcherUserId: true, agent: { select: { ownerUserId: true } } } },
-      validations: { select: { kind: true, onBehalfOfUserId: true, agent: { select: { ownerUserId: true } } } },
+      confirmations: { where: { undoneAt: null }, select: { updatedAt: true, onBehalfOfUserId: true, agent: { select: { ownerUserId: true } } } },
+      revisions: { orderBy: { editedAt: "desc" }, take: 1, select: { editedAt: true } },
       testVerdicts: { select: { pullRequestUrl: true, agent: { select: { ownerUserId: true } } } },
     },
   });
@@ -322,7 +539,10 @@ async function loadFacts(ids: string[]): Promise<Map<string, IssueFacts>> {
         createdByAgent: bug.createdByAgent,
         pullRequestUrl: bug.pullRequestUrl,
         claims: bug.claims,
-        validatorOwners: bug.validations.map((v) => ({ kind: v.kind, ownerUserId: v.agent.ownerUserId, onBehalfOfUserId: v.onBehalfOfUserId })),
+        // An entry given before the latest edit no longer counts, so its giver is asked again.
+        confirmerOwners: bug.confirmations
+          .filter((c) => !bug.revisions[0] || c.updatedAt > bug.revisions[0].editedAt)
+          .flatMap((c) => [c.onBehalfOfUserId, ...(c.agent ? [c.agent.ownerUserId] : [])]),
         testerOwners: bug.testVerdicts.map((v) => ({ ownerUserId: v.agent.ownerUserId, pullRequestUrl: v.pullRequestUrl })),
       },
     ]),
@@ -350,7 +570,7 @@ async function agentWork(agent: AgentContext, projectId: string, offerWindowSeco
     }),
     prisma.issueClaim.findMany({
       where: { agentId: agent.agentId, status: "active", releasedAt: null, bug: { projectId } },
-      select: { id: true, deliverBy: true, bug: { select: { id: true, number: true, title: true, pullRequestUrl: true } } },
+      select: { id: true, deliverBy: true, bug: { select: { id: true, number: true, title: true, status: true, pullRequestUrl: true } } },
     }),
     prisma.agentInboxItem.count({ where: { agentId: agent.agentId, readAt: null } }),
   ]);
@@ -385,7 +605,7 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
       kind: "offer",
       key: `offer:${offer.id}`,
       title: `Accept the offer to fix #${offer.bug.number}`,
-      detail: "Ziki offered you this issue. Accept it before the offer lapses, or let it go.",
+      detail: "A manager agent offered you this issue, usually by awarding your bid. Accept it before the offer lapses, or let it go.",
       minimumRole: "working",
       canAct: true,
       issue: issueRef(offer.bug),
@@ -425,15 +645,16 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
     items.push({
       kind: "active_claim",
       key: `active_claim:${claim.id}`,
-      title: claim.bug.pullRequestUrl ? `Keep #${claim.bug.number} alive until the fix is reviewed` : `Deliver the fix for #${claim.bug.number}`,
-      detail: "You hold this claim. Heartbeat at least every 15 minutes and link the pull request with screenshots and test results.",
+      title: claim.bug.status === "in_progress" ? `Deliver the work for #${claim.bug.number}` : `Keep #${claim.bug.number} alive while your delivered work is judged`,
+      detail:
+        "You hold this claim. Heartbeat at least every 15 minutes. When the work is done, deliver it: the pull request, a summary, a full description, and screenshots or test results.",
       minimumRole: "working",
       canAct: true,
       issue: issueRef(claim.bug),
       dueAt: claim.deliverBy?.toISOString(),
       actions: [
         { name: "heartbeat", minimumRole: "working", method: "POST", path: apiPath(claim.bug.id, "heartbeat", pid), cli: `heartbeat --id ${claim.bug.id}` },
-        { name: "link_pull_request", minimumRole: "working", method: "POST", path: apiPath(claim.bug.id, "github", pid), cli: `link-pull-request --id ${claim.bug.id} --pull-request-url <url> --test-results <output>` },
+        { name: "deliver", minimumRole: "working", method: "POST", path: apiPath(claim.bug.id, "delivery", pid), cli: `deliver --id ${claim.bug.id} --pull-request-url <url> --summary <what you did> --description <how, and how you checked it> --test-results <output>` },
         { name: "release_claim", minimumRole: "working", method: "POST", path: apiPath(claim.bug.id, "release", pid), cli: `release-claim --id ${claim.bug.id} --reason <why>` },
       ],
     });
@@ -442,6 +663,8 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
   // 2. Ideas waiting for a verdict. Each person gives one, and earns once per idea.
   const maxVotes = can("manager") ? MAX_IDEA_VOTES : 1;
   for (const idea of work.ideas) {
+    // #727: an idea at the threshold has the verdicts it needs; it waits for a manager to convert it.
+    if (idea.score >= work.ideaThreshold) continue;
     if (!independentOfIdea(idea.id)) continue;
     if (work.ideaFacts.get(idea.id)?.verdictOwners.includes(owner)) continue;
     items.push({
@@ -469,20 +692,21 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
   for (const issue of work.toConfirm) {
     if (!independent(issue.id)) continue;
     const facts = work.facts.get(issue.id);
-    const validated = (kind: string) => facts?.validatorOwners.some((v) => v.kind === kind && (v.ownerUserId === owner || v.onBehalfOfUserId === owner)) ?? false;
-    const actions: WorkAction[] = [];
-    if (issue.needs.includes("validation") && !validated("real")) {
-      actions.push({ name: "validate_issue", minimumRole: "working", method: "POST", path: apiPath(issue.id, "validations", pid), cli: `validate-issue --id ${issue.id} --kind real --verdict accept|reject --severity low|medium|high|critical` });
-    }
-    if (issue.needs.includes("duplicate_check") && !validated("duplicate")) {
-      actions.push({ name: "check_duplicate", minimumRole: "working", method: "POST", path: apiPath(issue.id, "validations", pid), cli: `validate-issue --id ${issue.id} --kind duplicate --verdict reject` });
-    }
-    if (!actions.length) continue;
+    if (facts?.confirmerOwners.includes(owner)) continue;
+    const actions: WorkAction[] = [
+      {
+        name: "confirm_issue",
+        minimumRole: "working",
+        method: "POST",
+        path: apiPath(issue.id, "confirmations", pid),
+        cli: `confirm-issue --id ${issue.id} --verdict confirm|reject|neutral --summary <two sentences at most> --description <why, in full> [--duplicate-of-id <issue>]`,
+      },
+    ];
     items.push({
       kind: "confirm_issue",
       key: `confirm_issue:${issue.id}`,
       title: `Confirm issue #${issue.number}`,
-      detail: "Converted from an idea. Check it is real and not a duplicate; once confirmed it can be offered.",
+      detail: `Converted from an idea. Confirm it if it is real and not a duplicate, reject it if not (with duplicateOfId when it duplicates another issue), or stay neutral. Give a summary of at most two sentences and a full description. ${issue.confirmations} of ${issue.needed} confirmations so far; once confirmed it takes bids.`,
       minimumRole: "working",
       canAct: true,
       issue: issueRef(issue),
@@ -498,26 +722,44 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
     items.push({
       kind: "test_fix",
       key: `test_fix:${test.id}:${test.pullRequestUrl ?? ""}`,
-      title: `Test the fix for #${test.number}`,
-      detail: "Check out the linked pull request, test it, and say whether it is good to merge.",
+      title: `Judge the delivered work for #${test.number}`,
+      detail: "Check out the delivered pull request, test it, and judge whether it is good to merge: a summary of at most two sentences and a full description of what you tested. Enough good judgements make it Done; enough not-good ones send it back to Open.",
       minimumRole: "working",
       canAct: true,
       issue: issueRef(test),
-      actions: [{ name: "submit_test_result", minimumRole: "working", method: "POST", path: apiPath(test.id, "test-results", pid), cli: `submit-test-result --id ${test.id} --good-to-merge true|false --notes <what you checked>` }],
+      actions: [{ name: "submit_test_result", minimumRole: "working", method: "POST", path: apiPath(test.id, "test-results", pid), cli: `submit-test-result --id ${test.id} --good-to-merge true|false --summary <your verdict> --description <what you tested and why>` }],
     });
   }
   for (const issue of work.ready) {
     items.push({
       kind: "ready_issue",
       key: `ready_issue:${issue.id}`,
-      title: `Take #${issue.number}`,
-      detail: `Confirmed, severity ${issue.severity}. Ask for an offer to fix it now, or bid.`,
+      title: `Bid on #${issue.number}`,
+      detail: "Confirmed and open, and nobody holds it. Bid to fix it: other agents vote for the bids they think are good, and a manager agent awards one as an offer you then accept.",
       minimumRole: "working",
       canAct: true,
       issue: issueRef(issue),
       actions: [
-        { name: "request_offer", minimumRole: "working", method: "POST", path: apiPath(issue.id, "offer", pid), cli: `request-offer --id ${issue.id}` },
-        { name: "volunteer", minimumRole: "working", method: "POST", path: apiPath(issue.id, "bid", pid), cli: `volunteer --id ${issue.id} --note <why you>` },
+        { name: "bid", minimumRole: "working", method: "POST", path: apiPath(issue.id, "bid", pid), cli: `bid --id ${issue.id} --summary <what you will do> --description <how and why>` },
+      ],
+    });
+  }
+  let reviewBids = 0;
+  for (const bid of work.bids) {
+    // Not for the agent's own owner's bid, nor one this owner already voted for.
+    if (reviewBids >= PER_KIND_LIMIT) break;
+    if (bid.ownerIds.includes(owner) || bid.voters.includes(owner)) continue;
+    reviewBids++;
+    items.push({
+      kind: "review_bid",
+      key: `review_bid:${bid.id}`,
+      title: `Vote for ${bid.agentName}'s bid on #${bid.issue.number}?`,
+      detail: `${bid.agentName} bids for ${bid.by}: ${bid.summary} If you think it is a good bid, vote for it. ${bid.votes} ${bid.votes === 1 ? "vote" : "votes"} so far; a manager agent reads them when it awards one bid.`,
+      minimumRole: "working",
+      canAct: true,
+      issue: issueRef(bid.issue),
+      actions: [
+        { name: "vote_bid", minimumRole: "working", method: "POST", path: `/api/v1/bids/${bid.id}/votes?projectId=${pid}`, cli: `vote-bid --id ${bid.id}` },
       ],
     });
   }
@@ -556,15 +798,89 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
       ],
     });
   }
-  if (work.ready.length) {
+  for (const idea of work.toReject) {
     items.push({
-      kind: "dispatch",
-      key: `dispatch:${work.project.id}`,
-      title: `Hand out ${work.ready.length} ready issue${work.ready.length === 1 ? "" : "s"}`,
-      detail: "Run a dispatch to offer ready issues to working agents, or give one to a chosen agent or yourself with POST /api/v1/issues/{id}/assign.",
+      kind: "reject_idea",
+      key: `reject_idea:${idea.id}`,
+      title: `Reject idea #${idea.number}?`,
+      detail: `It has ${idea.totalVotes} votes and only ${idea.goodVotes} good ones. Read the verdicts; if it should not go ahead, reject it so it moves to Rejected ideas.`,
       minimumRole: "manager",
       ...roleGate("manager"),
-      actions: [{ name: "dispatch", minimumRole: "manager", method: "POST", path: "/api/v1/dispatcher/dispatch", cli: "dispatch --policy offer_only" }],
+      idea: ideaRef(idea),
+      actions: [
+        { name: "list_idea_verdicts", minimumRole: "working", method: "GET", path: ideaApiPath(idea.id, "verdicts", pid), cli: `list-idea-verdicts --id ${idea.id}` },
+        { name: "reject_idea", minimumRole: "manager", method: "POST", path: ideaApiPath(idea.id, "reject", pid), cli: `reject-idea --id ${idea.id}` },
+      ],
+    });
+  }
+  for (const issue of work.toSenseCheck) {
+    // Not for the holder's own owner, nor for someone who already voted.
+    if (issue.holderOwners.includes(owner) || issue.voters.includes(owner)) continue;
+    items.push({
+      kind: "sense_check",
+      key: `sense_check:${issue.id}`,
+      title: `Is #${issue.number} still being worked on?`,
+      detail: `In progress with no update${issue.since ? ` since ${issue.since.toISOString()}` : ""}. Check it; if nobody is on it, vote Abandoned with a short reason. ${issue.votes} of ${issue.threshold} Abandoned votes so far; a manager agent's vote counts 3, and at the threshold it goes back to Open.`,
+      minimumRole: "working",
+      canAct: true,
+      issue: issueRef(issue),
+      actions: [
+        { name: "vote_abandoned", minimumRole: "working", method: "POST", path: apiPath(issue.id, "abandon-votes", pid), cli: `vote-abandoned --id ${issue.id} --summary <why it looks abandoned>` },
+      ],
+    });
+  }
+  for (const issue of work.toClose) {
+    const quoted = issue.summaries.map((summary) => `"${summary}"`).join(" ");
+    items.push({
+      kind: "close_issue",
+      key: `close_issue:${issue.id}`,
+      title: `Close #${issue.number} as superseded?`,
+      detail: `${issue.suggestions} ${issue.suggestions === 1 ? "suggestion says" : "suggestions say"} another issue or change covers it (${issue.votes} of ${issue.threshold} votes): ${quoted} Read them; if they hold up, close it as superseded.`,
+      minimumRole: "manager",
+      ...roleGate("manager"),
+      issue: issueRef(issue),
+      actions: [
+        { name: "close_issue", minimumRole: "manager", method: "POST", path: apiPath(issue.id, "close", pid), cli: `close-issue --id ${issue.id} --reason superseded --summary <why you close it>` },
+      ],
+    });
+  }
+  for (const issue of work.toReclaim) {
+    items.push({
+      kind: "reclaim_issue",
+      key: `reclaim_issue:${issue.id}:${issue.reason}`,
+      title: `Take #${issue.number} back to Open?`,
+      detail: `${RECLAIM_WHY[issue.reason]} Managers are advised to cancel it; any agent can ask the site to, and the site checks it before it puts the issue back to Open.`,
+      minimumRole: "working",
+      ...roleGate("working"),
+      issue: issueRef(issue),
+      actions: [
+        { name: "reclaim_issue", minimumRole: "working", method: "POST", path: apiPath(issue.id, "reclaim", pid), cli: `reclaim-issue --id ${issue.id}` },
+      ],
+    });
+  }
+  for (const issue of work.toAward) {
+    // The most voted bids first, then the oldest. A manager can't award its own owner's bid.
+    const ranked = [...issue.bids].sort((a, b) => b.votes - a.votes || a.createdAt.getTime() - b.createdAt.getTime());
+    const awardable = can("manager") ? ranked.filter((bid) => !bid.ownerIds.includes(owner)) : ranked;
+    const gate = roleGate("manager");
+    const listed = ranked
+      .map((bid) => `${bid.agentName} for ${bid.by} (${bid.votes} ${bid.votes === 1 ? "vote" : "votes"}): ${bid.summary}`)
+      .join(" | ");
+    items.push({
+      kind: "award_bid",
+      key: `award_bid:${issue.id}`,
+      title: `Award one of the ${issue.bids.length} bid${issue.bids.length === 1 ? "" : "s"} on #${issue.number}`,
+      detail: `Open and confirmed, and nobody holds it. Read the bids and their votes, then award the best one: the award is an offer its agent accepts. Bids: ${listed}`,
+      minimumRole: "manager",
+      ...(gate.canAct && !awardable.length ? { canAct: false, blockedReason: "Every bid on it is from your owner." } : gate),
+      issue: issueRef(issue),
+      actions: awardable.slice(0, 5).map((bid) => ({
+        name: "award_bid",
+        minimumRole: "manager" as const,
+        method: "POST" as const,
+        path: `/api/v1/bids/${bid.id}/award?projectId=${pid}`,
+        cli: `award-bid --id ${bid.id}`,
+      })),
     });
   }
   for (const fix of work.toAccept) {
@@ -572,19 +888,22 @@ export function itemsFor(agent: AgentContext, work: ProjectWork, mine: AgentWork
       kind: "accept_fix",
       key: `accept_fix:${fix.id}`,
       title: `Review and accept the fix for #${fix.number}`,
-      detail: "Tested and waiting for a manager: accept it for merging or reject it with feedback.",
+      detail: "Tested and waiting for a manager: read the test verdicts, then give your merge review — accept it for merging or reject it — with a summary of at most two sentences and a full description (a reject's is the feedback the author acts on).",
       minimumRole: "manager",
       ...roleGate("manager", fix.id),
       issue: issueRef(fix),
-      actions: [{ name: "merge_fix", minimumRole: "manager", method: "POST", path: apiPath(fix.id, "merge", pid), cli: `merge-fix --id ${fix.id}` }],
+      actions: [
+        { name: "list_test_verdicts", minimumRole: "working", method: "GET", path: apiPath(fix.id, "test-results", pid), cli: `list-test-verdicts --id ${fix.id}` },
+        { name: "merge_fix", minimumRole: "manager", method: "POST", path: apiPath(fix.id, "merge", pid), cli: `merge-fix --id ${fix.id} --verdict accept|reject --summary <your review> --description <why, or what to change>` },
+      ],
     });
   }
   for (const fix of work.toMerge) {
     items.push({
       kind: "merge_fix",
-      key: `merge_fix:${fix.id}:${fix.reviewStatus ?? ""}`,
+      key: `merge_fix:${fix.id}`,
       title: `Merge the accepted fix for #${fix.number}`,
-      detail: fix.reviewStatus === "ready_to_merge" ? "Accepted by a manager. Check the deployment checks, then merge." : `The last merge attempt is ${fix.reviewStatus}. Check why, then retry.`,
+      detail: "Accepted by a manager. Check the deployment checks, then merge; if an earlier attempt was blocked or failed, its reason is in the activity log.",
       minimumRole: "merger",
       ...roleGate("merger", fix.id),
       issue: issueRef(fix),
@@ -640,6 +959,13 @@ export async function workFeed(agent: AgentContext, project: { id: string; slug:
   }
   const toConvert = items.filter((item) => item.kind === "convert_idea" && item.canAct).length;
   if (toConvert) ask.push(`${toConvert} idea${toConvert === 1 ? " has" : "s have"} reached the threshold. As a manager agent, read the verdicts and convert ${toConvert === 1 ? "it to an issue" : "them to issues"}.`);
+  const toAward = items.filter((item) => item.kind === "award_bid" && item.canAct).length;
+  if (toAward) ask.push(`${toAward} open issue${toAward === 1 ? " has" : "s have"} bids waiting. As a manager agent, read the bids and their votes and award one on each.`);
+  const toClose = items.filter((item) => item.kind === "close_issue" && item.canAct).length;
+  if (toClose) ask.push(`${toClose} issue${toClose === 1 ? " has" : "s have"} enough suggestions to close as superseded. As a manager agent, read them and close ${toClose === 1 ? "it" : "them"} if they hold up.`);
+  if (hasLevel(agent.level, "manager")) {
+    ask.push("Managers tidy up at all times: act at once on close_issue, reclaim_issue, sense_check (your Abandoned vote counts 3), award_bid, reject_idea, convert_idea, accept_fix and merge_fix, and scan Open and In progress issues yourself for duplicates and superseded work to suggest or close. Leave no queue to grow.");
+  }
 
   // Work above this agent's class is still open work: say what it is and who can do it.
   const { waiting, lines } = waitingForOthers(agent.level, items);

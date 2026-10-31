@@ -3,25 +3,25 @@ import { newIssueHref } from "@/lib/reported-from";
 import "./issues.css";
 import { Avatar } from "@/components/avatar";
 import { Suspense } from "react";
-import type { Prisma, Severity } from "@prisma/client";
+import { RememberIssueList } from "@/components/back-to-list";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getIssueTypes, getPlatforms } from "@/lib/lookups";
-import { activeBulkOptions, loadBulkAssignees } from "@/lib/admin-list-lookups";
 import { auth } from "@/auth";
 import { requireUser } from "@/lib/auth-helpers";
-import { InboxButton } from "@/components/inbox-button";
-import { MergeIcon } from "@/components/merge-path";
-import { InboxAgents } from "@/components/inbox-agents";
-import { loadOwnAgents, type DashboardAgent } from "@/lib/dashboard-overview";
-import { agentWorkDone, describeWorkDone, type AgentWorkDone } from "@/lib/agent-work";
+
+import { ProjectNotesLink } from "@/components/project-notes-link";
+import { PipelineSteps } from "@/components/pipeline-steps";
+import { StageSidebar } from "@/components/stage-sidebar";
 import type { AppRole } from "@/lib/roles";
 import { IssueFilters } from "@/components/issue-filters";
 import { RowAge, RowAssignee } from "@/components/issue-row-meta";
-import { VoteButton } from "@/components/vote-button";
 import { IdeasList, type IdeaListRow } from "@/components/ideas-list";
+import { WhimsicalEmptyState } from "@/components/whimsical-empty-state";
+import { isUnstructuredDraft } from "@/lib/ideas";
 import { workflowFor } from "@/lib/workflow";
-import { severityLabels } from "@/lib/labels";
-import { severities } from "@/lib/validations/issue";
+import { ideaVotes, isBadIdea } from "@/lib/idea-rejection";
+import { statuses } from "@/lib/validations/issue";
 import { boundSearchTerm, escapeSearchQuery, toSingleQueryParam } from "@/lib/search";
 import {
   hasMatch,
@@ -34,7 +34,6 @@ import { Highlighted, SearchSnippet } from "@/components/search-highlight";
 import { formatIssueNumber, parseIssueNumberQuery } from "@/lib/issue-number";
 import {
   SHOW_RESOLVED_PARAM,
-  defaultStatusWhere,
   isDone,
   parseShowResolved,
   resultCountText,
@@ -45,12 +44,10 @@ import { calculatePagination } from "@/lib/pagination";
 import { issueListPaginationParams } from "@/lib/issue-list-pagination";
 import { DUPLICATES_PARAM, SHOW_DUPLICATES, duplicatesWhere, parseShowDuplicates } from "@/lib/duplicates";
 import { PaginationControls } from "@/components/pagination-controls";
-import { fetchVoterSummaries } from "@/lib/voter-summaries";
 import { dueDateValue, MILESTONE_PARAM, milestoneParamValue, milestoneWhere, parseMilestoneFilter } from "@/lib/milestones";
 import { loadMilestoneSummaries } from "@/lib/milestone-stats";
 import { MilestoneProgressBar } from "@/components/milestone-progress";
 import { MilestoneDue } from "@/components/milestone-due";
-import { createEmptyVoterSummary } from "@/lib/voters";
 import {
   bugSortDescriptions,
   getBugOrderBy,
@@ -62,10 +59,6 @@ import type { OrganizationRole } from "@/lib/organization-role";
 import { defaultSortFor, mineFilterWhere, parseMineFilter } from "@/lib/mine-filter";
 import { finishedWatchedWhere } from "@/lib/watching";
 import { UnwatchButton, UnwatchFinishedButton } from "@/components/unwatch-button";
-import {
-  BulkCheckbox,
-  BulkSelectionProvider,
-} from "@/components/bulk-selection";
 import { parseTagFilter, serializeTags, tagTypeIds } from "@/lib/tag-filter";
 import { bugInTenant, currentTenantIdFor, isMissingTenantColumnError } from "@/lib/tenant-context";
 import { activeProjectIdFor } from "@/lib/project-context";
@@ -82,90 +75,64 @@ import {
   platformFilterWhere,
 } from "@/lib/platform-filter";
 import { PlatformMenu, type PlatformTab } from "@/components/platform-tabs";
-import { IssueRowStatus } from "@/components/issue-row-status";
+import { ConfirmationCountBadge, IssueRowStatus } from "@/components/issue-row-status";
 import { mergePathOf } from "@/lib/merge-history";
-import { IssueRowStageTallies } from "@/components/issue-row-stage-tallies";
-import { claimDecisionKind, payloadMerged, tallyStages, type DecisionLike, type StageTallies } from "@/lib/decision-stages";
 import { IssuesToolsToggle } from "@/components/issues-tools-toggle";
 import { LoadError } from "@/components/load-error";
 import { logLoadFailure } from "@/lib/load-error";
 import { AREA_PARAM, parseProjectAreaFilter, projectAreaFilterWhere } from "@/lib/project-area-filter";
-import { openIssueStages, parseIssueStageView, type IssueStage } from "@/lib/issue-stage";
-import { voteDirection } from "@/lib/voting";
+import { openIssueConfirmations, parseIssueStageView, type IssueStage } from "@/lib/issue-stage";
 import { issuePath } from "@/lib/issue-ref";
 import { PROJECT_ALL_PARAM, showsAllProjects } from "@/lib/issue-list-filters";
+import { CountBadge } from "@/components/count-badge";
 
 /* Distinct browser-tab title; the root layout appends "· Ziki". */
 export const metadata = { title: "Issues" };
 
-/** `?status=all`: every issue. With no `?status=` the page opens on the Inbox. */
+/** `?status=all`: every issue. With no `?status=` the page opens on Ideas. */
 const ALL_STATUS = "all";
-/** `?status=escalated`: the Inbox; kept so older links still open it. */
-const ESCALATED_STATUS = "escalated";
-const ESCALATED_WHERE = { some: { answeredAt: null } } satisfies Prisma.AgentQuestionListRelationFilter;
-
-/**
- * The Inbox's three lists, picked with `?inbox=` on the escalated view:
- * agent questions waiting on someone (the default), redesign proposals
- * waiting on a decision, and new ideas (reported, not yet confirmed).
- */
-const INBOX_PARAM = "inbox";
-type InboxView = "input" | "design";
-const INBOX_TABS: { view: InboxView; label: string }[] = [
-  { view: "input", label: "Need your input" },
-  { view: "design", label: "Design feedback needed" },
-];
-/** `?status=ideas`: the Ideas tab. Ideas are not issues and come from their own table (#idea-table). */
+/** The Ideas tab, the page with no `?status=`. Ideas are not issues: they read the Idea table (#idea-table). */
 const IDEAS_STATUS = "ideas";
-/** Most ideas the tab lists, highest score first. */
-const IDEAS_LIMIT = 100;
-const DESIGN_WHERE = { some: { status: "proposed" } } satisfies Prisma.RedesignProposalListRelationFilter;
-const AGENT_ORDER = { waiting: 0, working: 1, idle: 2, offline: 3 } as const;
+/** Ideas a manager agent rejected (#idea-rejected), the second list under Ideas. */
+const REJECTED_IDEAS_STATUS = "rejected_ideas";
 
-/** `?status=rejected`: a reviewer agent found the issue isn't real (#1122). */
+/** The filters under the Ideas tab: new ideas (no `?ideas=`), or `?ideas=drafts`. */
+const IDEAS_PARAM = "ideas";
+type IdeasView = "new" | "drafts" | "rejected";
+/** Most ideas a list shows, highest score first. */
+const IDEAS_LIMIT = 100;
+
+/** `?status=rejected`: someone's confirmation entry rejected the issue (#1122, #issue-confirmations). */
 const REJECTED_STATUS = "rejected";
-const REJECTED_WHERE = { some: { kind: "real", verdict: "reject" } } satisfies Prisma.IssueValidationListRelationFilter;
+const REJECTED_WHERE = { some: { verdict: "reject", undoneAt: null } } satisfies Prisma.IssueConfirmationListRelationFilter;
 /** `?status=duplicate`: marked as a duplicate of another issue. */
 const DUPLICATE_STATUS = "duplicate";
-/**
- * `?status=ready_to_merge`: accepted fixes waiting for a merger agent (#SDLC).
- * Accepting a fix leaves the issue open or in progress, so the tab takes any
- * status but closed, and Open and In progress leave these out.
- */
-const READY_TO_MERGE_STATUS = "ready_to_merge";
-/** `?status=auto_merge`: resolved issues whose fix is live — merged to dev, staging, main/production (#SDLC). */
-const AUTO_MERGE_STATUS = "auto_merge";
-/**
- * `?status=resolved`: the Done tab (Ziki #713). A pull request is linked and
- * the project's required independent reviewers said it is good to merge
- * (review status `tested`). It follows the work, not a status a person set:
- * Open and In progress leave these out, as they do for Ready to Merge.
- */
-const DONE_STATUS = "resolved";
-/** Statuses an accepted fix can have while it waits to be merged. */
-const READY_TO_MERGE_STATUSES = ["open", "in_progress", "resolved"] as const;
-
-/** The filters under the All tab. Open, In progress and Done have tabs of their own. */
-const ALL_FILTERS = [ALL_STATUS, "closed", REJECTED_STATUS, DUPLICATE_STATUS].map((value) => ({
+/** The filters under the All tab. Every status has a tab of its own. */
+const ALL_FILTERS = [ALL_STATUS, REJECTED_STATUS, DUPLICATE_STATUS].map((value) => ({
   value,
   label: statusFilterLabel(value),
 }));
-/** The status tabs, left to right. */
-const STATUS_TABS = [IDEAS_STATUS, "open", "in_progress", DONE_STATUS, READY_TO_MERGE_STATUS, AUTO_MERGE_STATUS, ALL_STATUS].map((value) => ({
-  value,
-  label: statusFilterLabel(value),
-}));
+/**
+ * The three stages across the top, each holding the statuses listed down the
+ * left of the panel when it is picked. Ideas (the Idea table) comes first.
+ */
+const STAGE_GROUPS = [
+  // Ideas holds only ideas; Requires confirmation is an issue's first status, so it opens Working.
+  { label: "Ideas", statuses: [IDEAS_STATUS, REJECTED_IDEAS_STATUS] },
+  { label: "Working", statuses: ["requires_confirmation", "open", "in_progress", "closed"] },
+  { label: "Delivered", statuses: ["delivered", "done", "ready_to_merge", "resolved"] },
+] as const;
 
-/** New issue as a 32px + button; the name is kept for screen readers and the tooltip. */
+/** "+ Add Idea": every report starts as an idea (#idea-table). */
 function NewIssueButton({ className = "" }: { className?: string }) {
   return (
     <Link
       href={newIssueHref("/issues")}
-      title="New issue"
-      className={`issues-new inline-flex w-8 items-center justify-center rounded-lg border border-zk-border bg-zk-surface text-zk-text hover:bg-zk-chip ${className}`}
+      title="Add Idea"
+      className={`issues-new inline-flex items-center justify-center gap-1.5 rounded-lg border border-zk-border bg-zk-surface px-2.5 text-[13px] font-semibold text-zk-text hover:bg-zk-chip ${className}`}
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
-      <span className="sr-only">New issue</span>
+      Add Idea
     </Link>
   );
 }
@@ -181,7 +148,6 @@ const FEATURE_ICON_PATH =
 type SearchParams = Promise<{
   q?: string | string[];
   status?: string | string[];
-  severity?: string | string[];
   platform?: string | string[];
   area?: string | string[];
   sort?: string | string[];
@@ -191,10 +157,6 @@ type SearchParams = Promise<{
   tags?: string | string[];
   [key: string]: string | string[] | undefined;
 }>;
-
-function isSeverity(value: string | undefined): value is Severity {
-  return !!value && (severities as readonly string[]).includes(value);
-}
 
 async function loadOrEmpty<T>(label: string, load: () => Promise<T>, empty: T): Promise<T> {
   try {
@@ -242,10 +204,6 @@ export default async function BugsPage({
   const activeProject = tenantId && projectId
     ? await prisma.project.findFirst({ where: { id: projectId, tenantId }, select: { slug: true, name: true, goal: true } }).catch(() => null)
     : null;
-  // The breadcrumb's first crumb ("Zedu › Issues").
-  const workspaceName = tenantId
-    ? await loadOrEmpty("workspace name", async () => (await prisma.tenant.findUnique({ where: { id: tenantId }, select: { name: true } }))?.name ?? null, null)
-    : null;
 
   // #641: a short checklist for a new workspace's owner or admin, until it's
   // done or dismissed on this device.
@@ -268,12 +226,11 @@ export default async function BugsPage({
   const canDelete = canDeleteTicket(effectiveRole, membershipRole);
   const params = await searchParams;
   const qParam = toSingleQueryParam(params.q);
-  // No ?status= opens the Inbox (the escalated view); ?status=all is the All tab.
+  // No ?status= opens Ideas; ?status=all is the All tab.
   // A search with no tab picked looks across All, so any issue can be found.
   const statusParam =
     toSingleQueryParam(params.status) ??
-    (toSingleQueryParam(params.deleted) === "true" ? undefined : toSingleQueryParam(params.q)?.trim() ? ALL_STATUS : ESCALATED_STATUS);
-  const severityParam = toSingleQueryParam(params.severity);
+    (toSingleQueryParam(params.deleted) === "true" ? undefined : toSingleQueryParam(params.q)?.trim() ? ALL_STATUS : IDEAS_STATUS);
   const sortParam = toSingleQueryParam(params.sort);
   const pageParam = toSingleQueryParam(params.page);
   const deletedParam = toSingleQueryParam(params.deleted);
@@ -344,64 +301,28 @@ export default async function BugsPage({
   const tagsParam = serializeTags(selectedTags.map((t) => t.name));
 
   const statusWhere = statusFilterWhere(statusParam);
-  // With no status filter the All tab shows every issue, finished ones too;
-  // Open, In progress and Done are tabs of their own. Inbox (escalated) keeps
-  // to live work unless resolved issues were asked for (#1058).
+  // Each status tab filters on its status alone (one status per issue). With no
+  // status filter the All tab shows every issue.
   const showResolved = parseShowResolved(params[SHOW_RESOLVED_PARAM]);
-  const hidesResolved = statusParam === ESCALATED_STATUS && !isDeletedView && !showResolved;
-  if (statusWhere !== undefined) {
-    where.status = statusWhere;
-    // An accepted fix waiting to be merged is on the Ready to Merge tab instead.
-    if ((statusParam === "open" || statusParam === "in_progress") && !isDeletedView) {
-      where.AND = [{ OR: [{ reviewStatus: null }, { reviewStatus: { not: "ready_to_merge" } }] }];
-    }
-    // A tested fix (two good-to-merge verdicts) is on the Done tab instead (Ziki #713).
-    if ((statusParam === "open" || statusParam === "in_progress") && !isDeletedView) {
-      where.AND = [
-        ...(Array.isArray(where.AND) ? where.AND : where.AND ? [where.AND] : []),
-        { OR: [{ reviewStatus: null }, { reviewStatus: { not: "tested" } }] },
-      ];
-    }
-  } else if (hidesResolved) {
-    where.status = defaultStatusWhere(false);
-  }
-  // The Escalated tab: live issues with an agent question nobody has
-  // answered, the same rule as the Escalations page.
-  const isEscalatedView = statusParam === ESCALATED_STATUS && !isDeletedView;
-  const inboxParam = toSingleQueryParam(params[INBOX_PARAM]);
-  const inboxView: InboxView | null = !isEscalatedView
-    ? null
-    : inboxParam === "design"
-      ? inboxParam
-      : "input";
-  if (inboxView === "input") {
-    where.agentQuestions = ESCALATED_WHERE;
-  } else if (inboxView === "design") {
-    where.redesigns = DESIGN_WHERE;
-  }
-  // The Ideas tab lists the Idea table, not issues: no issue row matches it.
-  const isIdeasView = statusParam === IDEAS_STATUS && !isDeletedView;
+  if (statusWhere !== undefined) where.status = statusWhere;
+  // The Ideas tab lists ideas from their own table: no issue row matches it.
+  const ideasView: IdeasView | null =
+    isDeletedView
+      ? null
+      : statusParam === REJECTED_IDEAS_STATUS
+        ? "rejected"
+        : statusParam !== IDEAS_STATUS
+          ? null
+          : toSingleQueryParam(params[IDEAS_PARAM]) === "drafts"
+            ? "drafts"
+            : "new";
+  const isIdeasView = ideasView !== null;
   if (isIdeasView) where.id = { in: [] };
   if (statusParam === REJECTED_STATUS && !isDeletedView) {
-    where.validations = REJECTED_WHERE;
+    where.confirmations = REJECTED_WHERE;
   }
   if (statusParam === DUPLICATE_STATUS && !isDeletedView) {
     where.duplicateOfId = { not: null };
-  }
-  if (statusParam === READY_TO_MERGE_STATUS && !isDeletedView) {
-    where.status = { in: [...READY_TO_MERGE_STATUSES] };
-    where.reviewStatus = "ready_to_merge";
-  }
-  if (statusParam === AUTO_MERGE_STATUS && !isDeletedView) {
-    where.status = "resolved";
-    where.reviewStatus = "merged";
-  }
-  if (statusParam === DONE_STATUS && !isDeletedView) {
-    where.status = { in: [...READY_TO_MERGE_STATUSES] };
-    where.reviewStatus = "tested";
-  }
-  if (isSeverity(severityParam)) {
-    where.severity = severityParam;
   }
   // Platform filter: one category, or the issues with none set.
   const selectedPlatform = parsePlatformFilter(params.platform, platforms);
@@ -452,9 +373,15 @@ export default async function BugsPage({
     ? null
     : parseIssueStageView(toSingleQueryParam(params.stage));
   let stages = new Map<string, IssueStage>();
+  // How many independent people confirmed each open issue, under the one rule (#issue-confirmations).
+  let confirmationCounts = new Map<string, number>();
+  let confirmationStates = new Map<string, { accepts: number; needed: number; confirmed: boolean }>();
   if (!isDeletedView) {
     try {
-      stages = await openIssueStages(prisma, where);
+      const confirmations = await openIssueConfirmations(prisma, where);
+      stages = new Map([...confirmations].map(([id, c]) => [id, c.stage]));
+      confirmationCounts = new Map([...confirmations].map(([id, c]) => [id, c.accepts]));
+      confirmationStates = new Map([...confirmations].map(([id, c]) => [id, { accepts: c.accepts, needed: c.needed, confirmed: c.confirmed }]));
     } catch (error) {
       console.error("[bugs] issue stage lookup failed", error);
     }
@@ -475,35 +402,28 @@ export default async function BugsPage({
   // rows its result list shows — tabs, badges and the "Show N resolved" link
   // all follow the stage filter, not the pre-stage row set.
   // Count the same tenant/project and search scope without the selected tab:
-  // its status, and the extra clauses the Inbox lists, Rejected, Duplicates,
+  // its status, and the extra clauses Ideas, Rejected, Duplicates,
   // Ready to Merge and Live add. Left in, those leaked into every other tab's
   // count (on Ready to Merge, "All" only counted ready-to-merge issues).
   const {
     status: _selectedStatus,
     id: _stageIds,
-    agentQuestions: _escalated,
-    validations: _rejected,
+    confirmations: _rejected,
     duplicateOfId: _duplicate,
-    redesigns: _design,
-    reviewStatus: _review,
     AND: _notMergeStage,
     ...tabScope
   } = where;
   // Put the default duplicate scope back: the Duplicates filter's override is
   // dropped, but tabs and counts still leave out the duplicates the list hides.
   const statusTabWhere: Prisma.BugWhereInput = { ...tabScope, ...duplicatesWhere(showDuplicates) };
-  void _design;
   void _selectedStatus;
   void _stageIds;
-  void _escalated;
   void _rejected;
   void _duplicate;
-  void _review;
   void _notMergeStage;
   // The platform menu counts each platform's issues whatever tab is picked,
   // so its numbers don't move as you switch tabs; the tabs then split the
-  // picked platform's total. (Counting inside the Inbox showed 0 almost
-  // everywhere.) A ?stage= from the URL still narrows it (#626).
+  // picked platform's total. A ?stage= from the URL still narrows it (#626).
   const stageFromUrl = stageView !== null;
   const { categoryId: _platformClause, ...platformTabWhere }: Prisma.BugWhereInput = {
     ...statusTabWhere,
@@ -548,11 +468,12 @@ export default async function BugsPage({
     const next = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
       if (key === "page" || key === PLATFORM_PARAM) continue;
-      if (isEscalatedView && (key === INBOX_PARAM || key === SHOW_RESOLVED_PARAM)) continue;
+      if (isIdeasView && key === IDEAS_PARAM) continue;
       const single = toSingleQueryParam(value);
       if (single) next.set(key, single);
     }
-    if (isEscalatedView) next.set("status", ALL_STATUS);
+    // Platforms filter issues, so picking one from Ideas opens All.
+    if (isIdeasView) next.set("status", ALL_STATUS);
     if (id) next.set(PLATFORM_PARAM, id);
     const qs = next.toString();
     return qs ? `/issues?${qs}` : "/issues";
@@ -595,7 +516,8 @@ export default async function BugsPage({
         number: true,
         title: true,
         status: true,
-        severity: true,
+        // A closed issue says why when agents closed it (#close-superseded).
+        closeReason: true,
         voteCount: true,
         projectId: true,
         isDeleted: true,
@@ -603,27 +525,27 @@ export default async function BugsPage({
         duplicateOf: showDuplicates ? { select: { number: true } } : false,
         createdAt: true,
         updatedAt: true,
-        // A merged fix shows its dev → staging → main chips in the status column.
-        reviewStatus: true,
+        // A live fix shows its dev → staging → main chips in the status column.
         pullRequestUrl: true,
         type: { select: { name: true } },
         reporter: { select: { name: true, role: true, image: true } },
         assignee: { select: { name: true, role: true, image: true } },
         // Who is working on it and since when, for the status column.
+        // The claim working on it, or an offer waiting to be accepted.
         claims: {
-          where: { status: "active", releasedAt: null },
-          select: { claimedAt: true, createdAt: true, beneficiary: { select: { name: true } } },
-          take: 1,
+          where: { status: { in: ["active", "offered"] }, releasedAt: null },
+          select: { status: true, claimedAt: true, createdAt: true, beneficiary: { select: { name: true } } },
+          orderBy: { createdAt: "desc" },
+          take: 2,
         },
         category: { select: { id: true, name: true } },
         area: { select: { id: true, name: true } },
-        votes: userId
-          ? { where: { userId }, select: { id: true, value: true }, take: 1 }
-          : false,
         _count: {
           select: {
             comments: true,
             attachments: true,
+            // Open bids, shown on Open issues.
+            bids: { where: { withdrawnAt: null } },
           },
         },
       },
@@ -639,8 +561,10 @@ export default async function BugsPage({
   }
   const bugs = listed.bugs;
 
-  // #idea-table: the Ideas tab reads open ideas from their own table, in the
-  // same tenant, project and search scope as the issues.
+  // #idea-table: the Ideas tab's New ideas and Drafted read open ideas from
+  // their own table, in the same tenant, project and search scope as the
+  // issues. A draft is a person's idea not yet written up in the standard
+  // headings.
   const ideaWhere: Prisma.IdeaWhereInput = {
     tenantId: tenantId ?? "",
     ...(projectId && !allProjects ? { projectId } : {}),
@@ -655,11 +579,27 @@ export default async function BugsPage({
         }
       : {}),
   };
-  const ideasCount = tenantId && !isDeletedView ? await loadOrEmpty("ideas tab", () => prisma.idea.count({ where: ideaWhere }), 0) : 0;
+  // Rejected ideas (#idea-rejected), with the same scope and search as new ones.
+  const rejectedIdeaWhere: Prisma.IdeaWhereInput = { ...ideaWhere, status: "rejected" };
+  // The Ideas tab's counts show on every tab; drafts only while Ideas is open.
+  const [ideasCount, rejectedIdeasCount, draftIds] = await Promise.all([
+    tenantId && !isDeletedView ? loadOrEmpty("ideas tab", () => prisma.idea.count({ where: ideaWhere }), 0) : 0,
+    tenantId && !isDeletedView ? loadOrEmpty("rejected ideas tab", () => prisma.idea.count({ where: rejectedIdeaWhere }), 0) : 0,
+    tenantId && isIdeasView
+      ? loadOrEmpty(
+          "drafted ideas",
+          async () =>
+            (await prisma.idea.findMany({ where: { ...ideaWhere, createdByAgentId: null }, select: { id: true, description: true, createdByAgentId: true } }))
+              .filter(isUnstructuredDraft)
+              .map((idea) => idea.id),
+          [] as string[],
+        )
+      : ([] as string[]),
+  ]);
   const ideaRows: IdeaListRow[] = isIdeasView && tenantId
     ? await loadOrEmpty("ideas list", async () => {
         const rows = await prisma.idea.findMany({
-          where: ideaWhere,
+          where: ideasView === "drafts" ? { ...ideaWhere, id: { in: draftIds } } : ideasView === "rejected" ? rejectedIdeaWhere : ideaWhere,
           orderBy: [{ score: "desc" }, { createdAt: "desc" }, { id: "desc" }],
           take: IDEAS_LIMIT,
           select: {
@@ -673,6 +613,18 @@ export default async function BugsPage({
         for (const id of new Set(rows.map((row) => row.projectId))) {
           thresholds.set(id, await workflowFor(id).then((w) => w.ideaThreshold).catch(() => null));
         }
+        // Each idea's votes, to mark the bad ones red (lib/idea-rejection.ts).
+        const voteRows = rows.length
+          ? await prisma.ideaVerdict.groupBy({
+              by: ["ideaId", "opinion"],
+              where: { ideaId: { in: rows.map((row) => row.id) } },
+              _sum: { votes: true },
+            })
+          : [];
+        const votesByIdea = new Map<string, { opinion: string; votes: number }[]>();
+        for (const row of voteRows) {
+          votesByIdea.set(row.ideaId, [...(votesByIdea.get(row.ideaId) ?? []), { opinion: row.opinion, votes: row._sum.votes ?? 0 }]);
+        }
         return rows.map((row) => ({
           id: row.id,
           number: row.number,
@@ -683,6 +635,9 @@ export default async function BugsPage({
           reporterName: row.reporter.name,
           platform: row.category?.name ?? null,
           verdicts: row._count.verdicts,
+          rejected: ideasView === "rejected",
+          bad: ideasView !== "rejected" && (thresholds.get(row.projectId) ?? null) !== null
+            && isBadIdea(ideaVotes(votesByIdea.get(row.id) ?? []), thresholds.get(row.projectId)!),
         }));
       }, [] as IdeaListRow[])
     : [];
@@ -714,60 +669,6 @@ export default async function BugsPage({
     }
   }
 
-  const bugIds = bugs.map((bug) => bug.id);
-
-  // "Confirmed (3)": how many bots (reviewer agents) accepted each issue as real.
-  const botConfirmations = new Map(
-    (bugIds.length === 0 ? [] : await loadOrEmpty("bot confirmations", () => prisma.issueValidation.groupBy({
-      by: ["bugId"],
-      where: { bugId: { in: bugIds }, kind: "real", verdict: "accept" },
-      _count: { _all: true },
-    }), [])).map((row) => [row.bugId, row._count._all] as const),
-  );
-
-  // #1446: positive and negative agent decisions per stage, for the card's
-  // stage strip. Same rules as the issue page (lib/decision-stages.ts).
-  const stageTallies = new Map<string, StageTallies>();
-  if (bugIds.length > 0) {
-    const [validationRows, verdictRows, claimRows, auditRows] = await Promise.all([
-      loadOrEmpty("stage validations", () => prisma.issueValidation.groupBy({
-        by: ["bugId", "verdict"],
-        where: { bugId: { in: bugIds }, kind: "real" },
-        _count: { _all: true },
-      }), []),
-      loadOrEmpty("stage verdicts", () => prisma.testVerdict.groupBy({
-        by: ["bugId", "goodToMerge"],
-        where: { bugId: { in: bugIds } },
-        _count: { _all: true },
-      }), []),
-      loadOrEmpty("stage claims", () => prisma.issueClaim.groupBy({
-        by: ["bugId", "status", "releaseReason"],
-        where: { bugId: { in: bugIds }, claimedAt: { not: null } },
-        _count: { _all: true },
-      }), []),
-      loadOrEmpty("stage merges", () => prisma.agentAuditEvent.findMany({
-        where: { bugId: { in: bugIds }, action: { in: ["issue.accepted", "issue.merge_rejected", "github.merge_failed"] } },
-        select: { bugId: true, action: true, payload: true, agent: { select: { level: true } } },
-      }), []),
-    ]);
-    const rows = new Map<string, (DecisionLike & { count?: number })[]>();
-    const add = (bugId: string | null, row: DecisionLike & { count?: number }) => {
-      if (bugId) rows.set(bugId, [...(rows.get(bugId) ?? []), row]);
-    };
-    for (const r of validationRows) add(r.bugId, { kind: r.verdict === "reject" ? "rejected" : "confirmed", count: r._count._all });
-    for (const r of verdictRows) add(r.bugId, { kind: "verdict", goodToMerge: r.goodToMerge, count: r._count._all });
-    for (const r of claimRows) {
-      // The query already kept only claims that were taken up (claimedAt set).
-      const kind = claimDecisionKind({ status: r.status, claimedAt: "set", releaseReason: r.releaseReason });
-      if (kind) add(r.bugId, { kind, count: r._count._all });
-    }
-    for (const e of auditRows) {
-      const merger = e.agent.level === "manager" || e.agent.level === "merger";
-      if (e.action === "issue.accepted") add(e.bugId, { kind: "accepted", merged: payloadMerged(e.payload) });
-      else if (merger) add(e.bugId, { kind: e.action === "issue.merge_rejected" ? "merge_rejected" : "deploy_failed" });
-    }
-    for (const [bugId, bugRows] of rows) stageTallies.set(bugId, tallyStages(bugRows));
-  }
 
   // #289: filtering on one milestone shows its progress above the list.
   let milestoneSummary: Awaited<ReturnType<typeof loadMilestoneSummaries>>[number] | null = null;
@@ -816,25 +717,8 @@ export default async function BugsPage({
     }
   }
 
-  // Only admins get bulk actions. The type and platform menus reuse the
-  // lookups above, which already survived a missing table. The assignee
-  // query is the one extra read, and it must not take the list down either.
-  const bulkTypes = canDelete ? activeBulkOptions(tagTypes) : [];
-  const bulkPlatforms = canDelete ? activeBulkOptions(platforms) : [];
-  const bulkUsers = canDelete ? await loadBulkAssignees(tenantId) : [];
-
-  let voterSummaries = new Map<string, ReturnType<typeof createEmptyVoterSummary>>();
-  try {
-    voterSummaries = await fetchVoterSummaries(bugIds);
-  } catch (error) {
-    console.error("[bugs] voter summaries failed", error);
-    voterSummaries = new Map();
-  }
-
-  // The key is the current query string, so changing a filter or a page
-  // remounts the provider and clears the selection — which is what the bar
-  // tells the user will happen.
-  const selectionKey = new URLSearchParams(
+  // The current query string, which the status links build on.
+  const currentQuery = new URLSearchParams(
     Object.entries(params).flatMap(([k, v]) => {
       const single = toSingleQueryParam(v);
       return single ? [[k, single] as [string, string]] : [];
@@ -844,96 +728,57 @@ export default async function BugsPage({
   const confirmingCount = [...stages.values()].filter((stage) => stage === "confirming").length;
   const readyCount = [...stages.values()].filter((stage) => stage === "ready").length;
 
-  const [statusCounts, escalatedCount, rejectedCount, duplicateCount, readyToMergeByStatus, liveCount, testedByStatus] = isDeletedView || !tenantId ? [[], 0, 0, 0, [], 0, []] : await Promise.all([
+  const [statusCounts, rejectedCount, duplicateCount] = isDeletedView || !tenantId ? [[], 0, 0] : await Promise.all([
     loadOrEmpty("status tabs", () => prisma.bug.groupBy({
       by: ["status"], where: statusTabWhere, _count: { _all: true },
     }), []),
-    loadOrEmpty("escalated tab", () => prisma.bug.count({
-      where: { ...statusTabWhere, status: defaultStatusWhere(false), agentQuestions: ESCALATED_WHERE },
-    }), 0),
     loadOrEmpty("rejected filter", () => prisma.bug.count({
-      where: { ...statusTabWhere, validations: REJECTED_WHERE },
+      where: { ...statusTabWhere, confirmations: REJECTED_WHERE },
     }), 0),
     loadOrEmpty("duplicate filter", () => prisma.bug.count({
       where: { ...statusTabWhere, duplicateOfId: { not: null } },
     }), 0),
-    loadOrEmpty("ready to merge tab", () => prisma.bug.groupBy({
-      by: ["status"],
-      where: { ...statusTabWhere, status: { in: [...READY_TO_MERGE_STATUSES] }, reviewStatus: "ready_to_merge" },
-      _count: { _all: true },
-    }), []),
-    loadOrEmpty("live tab", () => prisma.bug.count({
-      where: { ...statusTabWhere, status: "resolved", reviewStatus: "merged" },
-    }), 0),
-    loadOrEmpty("done tab", () => prisma.bug.groupBy({
-      by: ["status"],
-      where: { ...statusTabWhere, status: { in: [...READY_TO_MERGE_STATUSES] }, reviewStatus: "tested" },
-      _count: { _all: true },
-    }), []),
   ]);
-  const readyToMergeFor = (status: string) => readyToMergeByStatus.find((row) => row.status === status)?._count._all ?? 0;
-  const readyToMergeCount = READY_TO_MERGE_STATUSES.reduce((sum, status) => sum + readyToMergeFor(status), 0);
-  // Open and In progress leave out what waits on the Ready to Merge tab, so the tabs never overlap.
-  const countForStatus = (status: string) =>
-    (statusCounts.find((row) => row.status === status)?._count._all ?? 0) -
-    (status === "open" || status === "in_progress" ? readyToMergeFor(status) : 0);
+  // One status per issue, so the status tabs never overlap and add up to All.
+  const countForStatus = (status: string) => statusCounts.find((row) => row.status === status)?._count._all ?? 0;
   const allCount = statusCounts.reduce((sum, row) => sum + row._count._all, 0);
-  // Done is the tested fixes (Ziki #713); Open and In progress leave them out too.
-  const testedFor = (status: string) => testedByStatus.find((row) => row.status === status)?._count._all ?? 0;
-  const doneCount = READY_TO_MERGE_STATUSES.reduce((sum, status) => sum + testedFor(status), 0);
-  const workTabCount = (status: string) =>
-    countForStatus(status) - (status === "open" || status === "in_progress" ? testedFor(status) : 0);
-  const tabCount = (value: string) =>
-    value === ALL_STATUS ? allCount
-      : value === IDEAS_STATUS ? ideasCount
-      : value === DONE_STATUS ? doneCount
-        : value === "open" || value === "in_progress" ? workTabCount(value)
-        : value === READY_TO_MERGE_STATUS ? readyToMergeCount
-          : value === AUTO_MERGE_STATUS ? liveCount
-            : countForStatus(value);
   const allFilterCount = (value: string) =>
-    value === ALL_STATUS ? allCount : value === REJECTED_STATUS ? rejectedCount : value === DUPLICATE_STATUS ? duplicateCount : value === READY_TO_MERGE_STATUS ? readyToMergeCount : countForStatus(value);
-  // The Inbox's other lists, counted only while it is open.
-  const liveTabWhere = { ...statusTabWhere, status: defaultStatusWhere(false) };
-  const designCount = inboxView && tenantId
-    ? await loadOrEmpty("design inbox", () => prisma.bug.count({ where: { ...liveTabWhere, redesigns: DESIGN_WHERE } }), 0)
-    : 0;
-  const inboxCounts: Record<InboxView, number> = { input: escalatedCount, design: designCount };
-  // Your agents and what they've done, for the right half of the Inbox's top box.
-  let inboxAgents: DashboardAgent[] = [];
-  let inboxWork = new Map<string, AgentWorkDone>();
-  if (inboxView && userId && tenantId) {
-    inboxAgents = await loadOrEmpty("inbox agents", () => loadOwnAgents({ userId, tenantId }), [] as DashboardAgent[]);
-    inboxWork = await loadOrEmpty("inbox agent work", () => agentWorkDone(inboxAgents.map((agent) => agent.id)), new Map<string, AgentWorkDone>());
-  }
-  const inboxHref = (view: InboxView) => {
-    // The Inbox is the page with no ?status=.
-    const next = new URLSearchParams(statusHref(null).split("?")[1] ?? "");
-    if (view !== "input") next.set(INBOX_PARAM, view);
-    return `/issues${next.size ? `?${next}` : ""}`;
-  };
+    value === ALL_STATUS ? allCount : value === REJECTED_STATUS ? rejectedCount : value === DUPLICATE_STATUS ? duplicateCount : countForStatus(value);
   // The All tab stays selected on its own filters (Closed, Rejected, Duplicates).
   const allSelected = ALL_FILTERS.some((filter) => filter.value === statusParam);
   const statusHref = (status: string | null) => {
-    const next = new URLSearchParams(selectionKey);
+    const next = new URLSearchParams(currentQuery);
     next.delete("page");
     next.delete("stage");
     next.delete(SHOW_RESOLVED_PARAM);
-    next.delete(INBOX_PARAM);
+    next.delete(IDEAS_PARAM);
     if (status) next.set("status", status);
     else next.delete("status");
     return `/issues${next.size ? `?${next}` : ""}`;
   };
+  // Only a status tab is picked (no search or other filter): an empty list then
+  // just means that tab is empty, so the empty state names the tab.
+  const onlyStatusTab =
+    Boolean(statusParam && (statuses as readonly string[]).includes(statusParam)) &&
+    !qParam && !tagsParam && !selectedPlatform && !selectedMilestone && !mineFilter;
   const emptyPlatform =
     Boolean(selectedPlatform) &&
     !isWatchingView &&
     !qParam &&
     !statusParam &&
-    !severityParam &&
     !tagsParam &&
     !selectedMilestone &&
     !selectedArea &&
     !stageView;
+
+  // The stage the page is on, and the status inside it, for the stage bar and the list on the left.
+  const currentStatus = ideasView === "rejected" ? REJECTED_IDEAS_STATUS : isIdeasView ? IDEAS_STATUS : statusParam;
+  // Requires confirmation: the left column counts confirmations, and the importance votes sit at the end of the row.
+  const confirmationsView = currentStatus === "requires_confirmation" && !isDeletedView;
+  const stageIndex = isDeletedView ? -1 : STAGE_GROUPS.findIndex((group) => (group.statuses as readonly string[]).includes(currentStatus ?? ""));
+  const statusCount = (value: string) =>
+    value === IDEAS_STATUS ? ideasCount : value === REJECTED_IDEAS_STATUS ? rejectedIdeasCount : countForStatus(value);
+  const statusLink = (value: string) => (value === IDEAS_STATUS ? statusHref(null) : statusHref(value));
 
   const headerContent = (
     <>
@@ -951,56 +796,33 @@ export default async function BugsPage({
       ) : null}
       <div className="issues-heading flex flex-wrap items-start justify-between gap-4">
         <div className="flex min-w-0 flex-col gap-1.5">
-          {/* A thin breadcrumb row, "Zedu › Issues", in place of a big title. */}
-          <nav aria-label="Breadcrumb" className="issues-breadcrumb flex min-w-0 flex-wrap items-center gap-2">
-            {workspaceName ? (
-              <>
-                <Link href="/dashboard" className="truncate text-zk-text2 hover:text-zk-text">{workspaceName}</Link>
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" className="shrink-0 text-zk-muted"><path d="m9 18 6-6-6-6" /></svg>
-              </>
-            ) : null}
-            <h1 aria-current="page" className="text-zk-text">
-              {isDeletedView ? "Deleted Issues" : "Issues"}
-            </h1>
-            {isDeletedView ? (
-              <span className="rounded-md bg-zk-bad-bg px-2 py-0.5 text-[11px] font-bold text-zk-bad-fg">Admin view</span>
-            ) : null}
-            {allProjects && !isDeletedView ? (
-              <span className="rounded-md border border-zk-border bg-zk-tint px-2 py-0.5 text-[11px] font-bold text-zk-accent">All projects</span>
-            ) : null}
-          </nav>
+          {/* No visible title: the stages above say where you are. */}
+          <h1 className="sr-only">{isDeletedView ? "Deleted Issues" : "Issues"}</h1>
+          {isDeletedView || allProjects ? (
+            <div className="flex flex-wrap items-center gap-2">
+              {isDeletedView ? (
+                <span className="rounded-md bg-zk-bad-bg px-2 py-0.5 text-[11px] font-bold text-zk-bad-fg">Admin view</span>
+              ) : null}
+              {allProjects && !isDeletedView ? (
+                <span className="rounded-md border border-zk-border bg-zk-tint px-2 py-0.5 text-[11px] font-bold text-zk-accent">All projects</span>
+              ) : null}
+            </div>
+          ) : null}
         </div>
         <Suspense fallback={<div className="h-8 w-36 rounded-lg bg-zk-chip" />}>
           <IssueFilters compact tagTypes={tagTypes} platforms={platforms} milestones={milestones} areas={areas} shortcutsEnabled={shortcutsEnabled}
             stageCounts={isDeletedView ? undefined : { confirming: confirmingCount, ready: readyCount }}
             trailing={isFirstRun ? null : (
               <>
-                {/* Desktop: New issue is a + just left of the platform menu, which stays rightmost. */}
+                {/* Desktop: New issue is a + at the end of the search/filter row. */}
                 {!isDeletedView ? <NewIssueButton className="max-md:hidden" /> : null}
-                <PlatformMenu
-                  compact
-                  tabs={platformTabs.map((tab) => ({ ...tab, href: platformHref(tab.id) }))}
-                  current={selectedPlatform}
-                />
               </>
             )} />
         </Suspense>
         <div className="issues-actions flex flex-wrap items-center gap-2 print:hidden">
-          {canDelete ? (
-            <Link
-              href={isDeletedView ? "/issues" : "/issues?deleted=true"}
-              className={`inline-flex h-8 items-center justify-center rounded-lg px-3 text-[13px] font-semibold border transition ${
-                isDeletedView
-                  ? "border-zk-border bg-zk-surface text-zk-text hover:bg-zk-chip"
-                  : "border-zk-bad-bd bg-zk-bad-soft text-zk-bad-fg hover:bg-zk-bad-bg"
-              }`}
-            >
-              {isDeletedView ? "← View active issues" : "View deleted issues"}
-            </Link>
-          ) : null}
           {finishedWatched > 0 ? <UnwatchFinishedButton count={finishedWatched} /> : null}
           <IssuesToolsToggle
-            active={Boolean(searchText || selectedPlatform || selectedTags.length > 0 || isSeverity(severityParam) || selectedMilestone)}
+            active={Boolean(searchText || selectedPlatform || selectedTags.length > 0 || selectedMilestone)}
           />
           {/* Phones: the + beside the title, since the tools row is collapsed there.
               Desktop uses the one in the tools row, unless that row has no platform menu yet. */}
@@ -1012,100 +834,6 @@ export default async function BugsPage({
 
   const listContent = (
     <div className="space-y-4">
-        {/* Inbox on the left (the escalated issues, formerly the Escalated tab);
-            the status tabs sit at the right of the same row. */}
-        <div className="issues-tabs-row flex items-center gap-2.5">
-          {!isDeletedView ? (
-            <InboxButton href={statusHref(null)} active={isEscalatedView} count={escalatedCount} />
-          ) : null}
-          {!isDeletedView ? (
-            <Link
-              href="/issues/history"
-              aria-label="Merge history"
-              title="Merge history"
-              className="inline-flex h-[42px] shrink-0 items-center gap-2 rounded-[10px] border border-zk-divider bg-zk-chip px-3 text-[13px] font-semibold text-zk-text hover:bg-zk-surface focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zk-accent max-sm:h-9"
-            >
-              <MergeIcon size={16} />
-            </Link>
-          ) : null}
-          {!isDeletedView ? (
-            <nav aria-label="Issue status" className="issues-status-nav ml-auto min-w-0">
-              <ul>
-                {STATUS_TABS.map(({ value, label }) => (
-                  <li key={value}>
-                    <Link href={statusHref(value)} aria-current={(value === ALL_STATUS ? allSelected : value === statusParam) ? "page" : undefined}>
-                      <span className={`issues-status-dot issues-status-${value}`} aria-hidden="true" />
-                      {label}<span className="issues-status-count">{tabCount(value)}</span>
-                    </Link>
-                  </li>
-                ))}
-              </ul>
-            </nav>
-          ) : null}
-        </div>
-
-        {inboxView ? (
-          <>
-            {/* How the Inbox works, above its three lists. */}
-            {/* One box in two halves: how the Inbox works, and your agents with what they've done. */}
-            <section aria-label="How the Inbox works" className="grid overflow-hidden rounded-[14px] border border-zk-border bg-zk-surface md:grid-cols-[minmax(0,1fr)_280px]">
-              <div className="flex items-start gap-3 p-4">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zk-tint text-zk-accent" aria-hidden="true">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M22 12h-6l-2 3h-4l-2-3H2" />
-                    <path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z" />
-                  </svg>
-                </span>
-                <div className="min-w-0">
-                  <h2 className="text-sm font-bold text-zk-text">How the Inbox works</h2>
-                  <p className="mt-0.5 text-[13px] leading-relaxed text-zk-text2">
-                    Agents work through issues on their own and stop here when they need a person: to answer a question, give feedback on a design, or weigh in on a new idea.
-                  </p>
-                </div>
-              </div>
-              <div aria-label="Your agents" role="group" className="flex flex-col gap-2 border-zk-divider p-3 max-md:border-t md:border-l">
-                <h2 className="text-xs font-bold uppercase tracking-[0.06em] text-zk-muted">Your agents</h2>
-                <InboxAgents
-                  // Agents waiting on you, then working ones, come first.
-                  agents={[...inboxAgents].sort((a, b) => AGENT_ORDER[a.status] - AGENT_ORDER[b.status]).map((agent) => {
-                    const done = describeWorkDone(inboxWork.get(agent.id));
-                    return {
-                      id: agent.id,
-                      name: agent.name,
-                      avatar: agent.avatar,
-                      status: agent.status,
-                      activity: agent.activity,
-                      done: done ? `Last 30 days: ${done}` : "Nothing done in the last 30 days",
-                    };
-                  })}
-                />
-              </div>
-            </section>
-            <nav aria-label="Inbox lists" className="issues-inbox-tabs overflow-x-auto">
-              <ul className="flex w-max gap-1 border-b border-zk-divider">
-                {INBOX_TABS.map(({ view, label }) => {
-                  const on = inboxView === view;
-                  return (
-                    <li key={view}>
-                      <Link
-                        href={inboxHref(view)}
-                        aria-current={on ? "page" : undefined}
-                        className={`-mb-px inline-flex h-10 items-center gap-1.5 whitespace-nowrap border-b-2 px-3 text-[13px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zk-accent ${
-                          on ? "border-electric-blue-strong font-semibold text-zk-text" : "border-transparent font-medium text-zk-text2 hover:text-zk-text"
-                        }`}
-                      >
-                        {label}
-                        <span className={`rounded-full px-1.5 font-mono text-[11px] tabular-nums ${on ? "bg-zk-tint text-zk-accent" : "bg-zk-chip text-zk-muted"}`}>
-                          {inboxCounts[view]}
-                        </span>
-                      </Link>
-                    </li>
-                  );
-                })}
-              </ul>
-            </nav>
-          </>
-        ) : null}
 
         {!isDeletedView && allSelected ? (
           <nav aria-label="Filter all issues" className="issues-all-filters flex flex-wrap items-center justify-end gap-1.5">
@@ -1146,35 +874,43 @@ export default async function BugsPage({
         ) : null}
 
         {isIdeasView ? (
-          <IdeasList ideas={ideaRows} />
+          <IdeasList
+            ideas={ideaRows}
+            empty={
+              ideasView === "drafts"
+                ? "No unstructured draft ideas are waiting to be structured."
+                : ideasView === "rejected"
+                  ? "No rejected ideas. A manager agent rejects a bad idea: one whose votes reach the threshold and whose bad and neutral votes outnumber its good ones."
+                  : undefined
+            }
+          />
         ) : isFirstRun ? (
           <FirstRunWelcome isAdmin={canDelete} hasTenant={Boolean(tenantId)} />
         ) : bugs.length === 0 ? (
-          <div className="rounded-[20px] border border-zk-border bg-zk-surface px-4 py-12 text-center">
-            <p className="font-bold text-zk-text">
-              {inboxView
-                ? "Nothing here right now."
-                : isWatchingView && !qParam && !statusParam && !severityParam && !tagsParam && !selectedPlatform && !selectedMilestone
+          <WhimsicalEmptyState
+            title={
+              isWatchingView && !qParam && !statusParam && !tagsParam && !selectedPlatform && !selectedMilestone
                 ? "You're not watching any issues."
                 : emptyPlatform
                   ? "No issues on this platform"
-                  : "No issues match these filters."}
-            </p>
-            <p className="mt-1.5 text-sm text-zk-muted">
-              {inboxView === "input"
-                ? "No agent is waiting on an answer."
-                : inboxView === "design"
-                  ? "No redesign proposals are waiting for a decision."
-                  : isWatchingView
+                  : onlyStatusTab
+                    ? `No issues in ${statusFilterLabel(statusParam!)}.`
+                    : "No issues match these filters."
+            }
+            description={
+              isWatchingView
                 ? "You watch issues you report, are assigned to or comment on, and any you choose to watch from the issue page."
                 : emptyPlatform
                   ? "Issues tagged for this platform will show up here."
-                  : "Try clearing filters, or report it with New issue."}
-            </p>
-            <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
-              <Link href="/issues" className="text-sm font-bold text-zk-accent hover:underline">Clear filters</Link>
-            </div>
-          </div>
+                  : onlyStatusTab
+                    ? undefined
+                    : "Maybe the bugs went into hiding, or they've all been squashed! Try clearing your filters or create a new issue."
+            }
+            clearHref="/issues"
+            createHref="/issues/new"
+            showClear={Boolean(!onlyStatusTab && (qParam || statusParam || tagsParam || selectedPlatform || selectedMilestone))}
+            showCreate={true}
+          />
         ) : (
           <section className="issues-results flex flex-col gap-3.5">
             <div className="issues-results-summary flex flex-wrap items-baseline justify-between gap-2.5">
@@ -1200,59 +936,53 @@ export default async function BugsPage({
             <div className="issues-table relative">
               <div>
                 <div className="issues-table-heading">
-                  {canDelete && !isDeletedView ? <span className="issues-selection" aria-hidden="true" /> : null}
-                  <span className="w-[52px]">Votes</span>
+                  {confirmationsView ? (
+                    <abbr className="w-[52px] no-underline" title="Confirmations">Conf.</abbr>
+                  ) : (
+                    <span className="w-[76px] shrink-0 text-center">Importance</span>
+                  )}
                   <span className="min-w-0 flex-1">Issue</span>
                   <span className="issues-status-cell">Status</span>
-                  <span className="issues-priority">Priority</span>
+                  {confirmationsView ? <span className="issues-vote-end">Importance</span> : null}
                   <span className="w-10" aria-hidden="true" />
                 </div>
                 <ul>
                   {bugs.map((bug, index) => {
-                    const userVote =
-                      Array.isArray(bug.votes) && bug.votes.length > 0
-                        ? voteDirection(bug.votes[0].value ?? 1)
-                        : 0;
-                    const voterSummary =
-                      voterSummaries.get(bug.id) ?? createEmptyVoterSummary();
                     const stage = stages.get(bug.id);
                     const typeName = bug.type?.name ?? "—";
                     const isSecurity = /security/i.test(typeName);
                     const isFeature = !isSecurity && /feature|improve|enhance|request|idea/i.test(typeName);
-                    const claim = bug.claims?.[0];
+                    const claim = bug.claims?.find((c) => c.status === "active");
+                    const offer = bug.claims?.find((c) => c.status === "offered");
                     // Someone is on it: an active claim, or the issue was moved to in progress.
                     const work = claim || bug.status === "in_progress"
                       ? { person: claim?.beneficiary?.name ?? bug.assignee?.name ?? null, since: claim ? (claim.claimedAt ?? claim.createdAt) : null }
                       : null;
+                    // Importance in a list is a number to read, not a button: it is marked on the issue's page.
+                    const importance = <CountBadge value={bug.voteCount} label={`Importance ${bug.voteCount}`} testId="importance-count" />;
                     const rowStatus = (
-                      <IssueRowStatus status={bug.status} stage={stage} botConfirmations={botConfirmations.get(bug.id) ?? 0} work={work}
-                        mergePath={bug.reviewStatus === "merged" ? mergePathOf(bug) : null} />
+                      <IssueRowStatus status={bug.status} stage={stage} botConfirmations={confirmationCounts.get(bug.id) ?? 0} work={work}
+                        closeReason={bug.closeReason}
+                        confirmed={confirmationStates.get(bug.id)?.confirmed ?? false}
+                        bids={bug.status === "open" ? bug._count.bids : undefined}
+                        offeredTo={bug.status === "open" && offer ? (offer.beneficiary?.name ?? "someone") : null}
+                        mergePath={bug.status === "resolved" && bug.pullRequestUrl ? mergePathOf(bug) : null} />
                     );
 
                     return (
                       <li
                         key={bug.id}
-                        data-severity={bug.severity}
                         className={`issues-row flex items-center gap-2 px-2 py-3.5 lg:gap-4 lg:px-4 ${
                           index < bugs.length - 1 ? "border-b border-zk-divider" : ""
                         }`}
                       >
-                        {canDelete && !isDeletedView ? (
-                          <div className="issues-selection shrink-0">
-                            <BulkCheckbox id={bug.id} title={bug.title} />
+                        {confirmationsView ? (
+                          <div className="w-[52px] shrink-0">
+                            <ConfirmationCountBadge {...(confirmationStates.get(bug.id) ?? { accepts: 0, needed: 0, confirmed: false })} />
                           </div>
-                        ) : null}
-                        <div className="issues-vote w-[52px] shrink-0">
-                          <VoteButton
-                            bugId={bug.id}
-                            voteCount={bug.voteCount}
-                            userVote={userVote}
-                            likeCount={voterSummary.likes.count}
-                            size="sm"
-                            chevron
-                            readOnly={isDeletedView}
-                          />
-                        </div>
+                        ) : (
+                          <div className="issues-vote w-[76px] shrink-0">{importance}</div>
+                        )}
                         <Link
                           href={issuePath(bug.number)}
                           data-issue-link=""
@@ -1306,15 +1036,13 @@ export default async function BugsPage({
                               {/* Below md (768px) the status column is hidden, so the status rides at the end of this line. */}
                               <span className="inline-flex min-w-0 md:sr-only">{rowStatus}</span>
                             </span>
-                            <IssueRowStageTallies tallies={stageTallies.get(bug.id)} />
                             {snippets.has(bug.id) ? <SearchSnippet snippet={snippets.get(bug.id)!} /> : null}
                           </span>
                         </Link>
                         <span className="issues-status-cell" aria-hidden="true">{rowStatus}</span>
-                        <span className="issues-priority" title={`${severityLabels[bug.severity]} priority`}>
-                          <span className="sr-only">{severityLabels[bug.severity]} priority</span>
-                          <span className="issues-priority-bars" aria-hidden="true">{[0, 1, 2].map((bar) => <i key={bar} data-active={bar < ({ low: 1, medium: 2, high: 3, critical: 3 }[bug.severity])} />)}</span>
-                        </span>
+                        {confirmationsView ? (
+                          <div className="issues-vote issues-vote-end shrink-0">{importance}</div>
+                        ) : null}
                         <span
                           className={`w-10 shrink-0 items-center justify-end gap-2 ${
                             isWatchingView && !bug.isDeleted ? "flex" : "hidden lg:flex"
@@ -1349,7 +1077,6 @@ export default async function BugsPage({
               to={pagination.to}
               queryParams={issueListPaginationParams({
                 status: statusParam,
-                severity: severityParam,
                 mine: mineFilter,
                 q: qParam,
                 sort: sortParam,
@@ -1370,22 +1097,51 @@ export default async function BugsPage({
   );
 
   return (
+    <>
+    {/* An issue's back arrow returns here, to this tab, filters and page. */}
+    <Suspense fallback={null}>
+      <RememberIssueList />
+    </Suspense>
+    {/* The stages, centred, with Project notes at the right of the same row. */}
+    <div className="relative mx-auto mb-4 flex min-h-8 w-full max-w-6xl items-start justify-center">
+      {!isDeletedView ? (
+        <PipelineSteps
+          stages={STAGE_GROUPS.map((group, index) => ({
+            label: group.label,
+            count: group.statuses.reduce((sum, value) => sum + statusCount(value), 0),
+            href: statusLink(group.statuses[0]),
+            selected: index === stageIndex,
+          }))}
+        />
+      ) : null}
+      <div className="absolute right-0 top-0 flex items-center gap-2">
+        <ProjectNotesLink />
+        <PlatformMenu
+          iconOnly
+          tabs={platformTabs.map((tab) => ({ ...tab, href: platformHref(tab.id) }))}
+          current={selectedPlatform}
+        />
+      </div>
+    </div>
     <div className="issues-page mx-auto w-full max-w-6xl space-y-5">
       {headerContent}
-      {canDelete && !isDeletedView ? (
-        <BulkSelectionProvider
-          key={selectionKey}
-          pageIds={bugIds}
-          types={bulkTypes}
-          platforms={bulkPlatforms}
-          users={bulkUsers}
-        >
+      <div className="flex items-start gap-5 max-lg:flex-col max-lg:gap-3">
+        {stageIndex >= 0 ? (
+          <StageSidebar
+            steps={STAGE_GROUPS[stageIndex].statuses.map((value) => ({
+              label: value === IDEAS_STATUS ? "New ideas" : value === REJECTED_IDEAS_STATUS ? "Rejected ideas" : statusFilterLabel(value),
+              count: statusCount(value),
+              href: statusLink(value),
+              selected: value === currentStatus,
+            }))}
+          />
+        ) : null}
+        <div className="min-w-0 flex-1">
           {listContent}
-        </BulkSelectionProvider>
-      ) : (
-        listContent
-      )}
+        </div>
+      </div>
     </div>
+    </>
   );
 }
 

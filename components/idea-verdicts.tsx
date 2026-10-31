@@ -1,5 +1,7 @@
+import { EntrySummary } from "@/components/entry-summary";
 import { LocalTime } from "@/components/local-time";
-import { AddVerdictDialog } from "@/components/add-verdict-dialog";
+import { AddVerdictDialog } from "@/components/add-verdict-dialog";
+import { CountBadge, CountBadgeCheck } from "@/components/count-badge";
 
 export type IdeaOpinionName = "good" | "bad" | "neutral";
 
@@ -27,7 +29,7 @@ export type IdeaVerdictBlock = "own" | "closed" | "deleted" | null;
 
 const BLOCK_REASON: Record<Exclude<IdeaVerdictBlock, null>, string> = {
   own: "This is your idea, so you can't give it a verdict.",
-  closed: "This idea is closed, so it takes no more verdicts.",
+  closed: "This idea is no longer open (converted or rejected), so it takes no more verdicts.",
   deleted: "This idea is deleted.",
 };
 
@@ -160,17 +162,10 @@ export function IdeaVerdictsPanel({
                 {verdict.agentName ? <span className="text-zk-muted">via {verdict.agentName}</span> : null}
                 {verdict.votes > 1 ? <span className="text-zk-muted">· {plural(verdict.votes, "vote")}</span> : null}
                 <span className="whitespace-nowrap text-xs text-zk-muted">
-                  · <LocalTime compact date={verdict.updatedAt} />
+                  · <LocalTime date={verdict.updatedAt} />
                 </span>
               </p>
-              <p className="mb-0 mt-1 break-words text-[13px] leading-[1.5] text-zk-text">{verdict.summary}</p>
-              <details className="group mt-1">
-                <summary className="cursor-pointer list-none text-xs font-bold text-zk-accent hover:underline [&::-webkit-details-marker]:hidden">
-                  <span className="group-open:hidden">Show full description</span>
-                  <span className="hidden group-open:inline">Hide full description</span>
-                </summary>
-                <p className="mb-0 mt-1.5 whitespace-pre-line break-words text-[13px] leading-[1.5] text-zk-text2">{verdict.description}</p>
-              </details>
+              <EntrySummary summary={verdict.summary} description={verdict.description} />
             </li>
           ))}
         </ul>
@@ -183,20 +178,18 @@ export function IdeaVerdictsPanel({
  * In place of the upvote button on an idea's row: its net verdict score,
  * labelled "score". Ideas take verdicts, not upvotes.
  */
-export function IdeaScoreBadge({ score, threshold = null }: { score: number; threshold?: number | null }) {
-  const passed = threshold !== null && score >= threshold;
-  const label = threshold === null ? `Idea score ${score}` : `Idea score ${score} of ${threshold}${passed ? ", ready to convert" : ""}`;
+export function IdeaScoreBadge({ score, threshold = null, bad = false }: { score: number; threshold?: number | null; bad?: boolean }) {
+  const passed = !bad && threshold !== null && score >= threshold;
+  const label = threshold === null
+    ? `Idea score ${score}`
+    : `Idea score ${score} of ${threshold}${bad ? ", reject advised" : passed ? ", idea accepted" : ""}`;
   return (
-    <span
-      data-testid="idea-score-badge"
-      aria-label={label}
-      title={label}
-      className={`inline-flex min-w-[2.75rem] flex-col items-center justify-center rounded-lg border px-2 py-1 text-xs font-semibold ${
-        passed ? "border-transparent bg-zk-ok-bg text-zk-ok-fg" : "border-dashed border-zk-border text-zk-text"
-      }`}
-    >
-      <span className="tabular-nums leading-tight">{score}</span>
-      <span className="text-[10px] font-medium leading-tight text-zk-muted">score</span>
-    </span>
+    <CountBadge
+      value={score}
+      label={label}
+      tone={bad ? "bad" : passed ? "ok" : "neutral"}
+      icon={passed ? <CountBadgeCheck /> : undefined}
+      testId="idea-score-badge"
+    />
   );
 }

@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { reportSummarySchema } from "@/lib/validations/report-summary";
 import { z } from "zod";
 import type { IdeaStatus, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
@@ -43,18 +44,20 @@ export const createIdeaSchema = createBugSchema
     // #494: no beneficiaryUserId. The reporter is always the agent's owner.
     projectId: idSchema.optional(),
     typeId: z.unknown().optional(),
-    severity: z.unknown().optional(),
     acknowledgeSimilar: z.unknown().optional(),
     attachmentIds: attachmentIdsSchema,
+    // Up to three plain lines a person can read at a glance (#report-summary).
+    summary: reportSummarySchema,
   })
   .strict();
 
-export const IDEA_STATUSES = ["open", "converted", "closed"] as const satisfies readonly IdeaStatus[];
+export const IDEA_STATUSES = ["open", "converted", "rejected"] as const satisfies readonly IdeaStatus[];
 
 export const ideaSelect = {
   id: true,
   number: true,
   title: true,
+  summary: true,
   description: true,
   status: true,
   score: true,
@@ -199,11 +202,11 @@ export async function createAgentIdea(agent: AgentContext, request: NextRequest)
     projectId: scope.projectId,
     beneficiaryUserId,
     title: input.title,
+    summary: input.summary,
     description: input.description,
     categoryId: input.categoryId || null,
     proofLinks: input.proofLinks,
     typeId: input.typeId ?? null,
-    severity: input.severity ?? null,
     acknowledgeSimilar: input.acknowledgeSimilar ?? null,
     ...(input.attachmentIds?.length ? { attachmentIds: [...new Set(input.attachmentIds)].sort() } : {}),
     ...(input.areaId ? { areaId: input.areaId } : {}),
@@ -215,7 +218,6 @@ export async function createAgentIdea(agent: AgentContext, request: NextRequest)
     requestHash,
     title: input.title,
     typeId: input.typeId,
-    severity: input.severity,
     acknowledgeSimilar: input.acknowledgeSimilar,
     insert: async (tx, policy) => {
       const member = await tx.membership.findUnique({
@@ -239,6 +241,7 @@ export async function createAgentIdea(agent: AgentContext, request: NextRequest)
           ...scope,
           typeId: policy.typeId,
           title: input.title,
+          summary: input.summary,
           description,
           categoryId,
           areaId,

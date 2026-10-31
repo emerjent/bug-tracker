@@ -7,66 +7,85 @@ describe("working on issues together", () => {
   let id: string;
 
   beforeAll(async () => {
-    // Comments are for issues; ideas take only verdicts.
+    // Replies are for issue entries; ideas take only verdicts.
     id = await fileIssue("cara", "CLI collaboration: list goes blank", ["ada", "bob", "eli"]);
   });
 
-  it("threads comments and replies, readable newest-first and from the start", async () => {
-    const first = await ok("bob", "comment", { id, body: "I can reproduce this on Firefox." });
-    const commentId = first.comment?.id ?? first.id;
-    expect(commentId, JSON.stringify(first)).toBeTruthy();
-    await ok("dana", "comment", { id, body: "Same here, after the last deploy.", parentId: commentId });
-    const latest = await ok("ada", "list-comments", { id });
-    expect(JSON.stringify(latest)).toContain("I can reproduce this on Firefox.");
-    const fromStart = await ok("ada", "list-comments-from-start", { id });
-    expect(JSON.stringify(fromStart)).toContain("Same here, after the last deploy.");
+  it("takes no comment on the issue itself before it is Open: the 409 names the stage's entry route", async () => {
+    const body = await refused("bob", "comment", { id, body: "I can reproduce this on Firefox." }, 409);
+    expect(body.error).toBe("use_stage_entry");
+    // A new issue requires confirmation, so the entry is a confirmation.
+    expect(body.entryRoute).toMatch(/\/confirmations$/);
+    expect(body.message).toMatch(/only while it is Open/);
   });
 
-  it("files a structured delivery-type comment with metadata", async () => {
-    const posted = await ok("bob", "comment", {
-      id,
-      body: "Root cause found in the list query.",
-      type: "review",
-      metadata: JSON.stringify({ confidence: 80, confidenceReason: "Reproduced locally." }),
-    });
-    expect(JSON.stringify(posted)).toContain("Root cause found");
+  it("refuses typed comments and metadata with a 400 that lists the entry routes", async () => {
+    const { projectId } = (await ok("ada", "get-issue", { id })).issue;
+    const typed = await ziki(
+      "request", "POST", `/api/v1/issues/${id}/comments?projectId=${projectId}`,
+      "--body", JSON.stringify({ body: "Root cause found in the list query.", type: "review", metadata: { confidence: 80 } }),
+      "--as", "bob",
+    );
+    expect(typed.code).toBe(1);
+    expect(typed.json?.status).toBe(400);
+    expect(typed.out + typed.err).toMatch(/comment_has_no_type/);
+    expect(typed.out + typed.err).toMatch(/test-results/);
   });
 
-  it("waits for confirmation before taking interest or bids", async () => {
-    await refused("bob", "register-interest", { id, note: "Too early." }, 409);
-    await refused("bob", "volunteer", { id, note: "Too early." }, 409);
+  it("waits for confirmation before taking bids", async () => {
+    await refused("bob", "bid", { id, summary: "Too early.", description: "Not confirmed yet." }, 409);
   });
 
-  it("registers, lists and withdraws interest once confirmed", async () => {
-    await confirm(id, ["ada", "bob"], "dana");
-    await ok("bob", "register-interest", { id, note: "Happy to take this." });
-    expect(JSON.stringify(await ok("ada", "list-interest", { id }))).toContain("Happy to take this.");
-    await ok("bob", "withdraw-interest", { id });
-    expect(JSON.stringify(await ok("ada", "list-interest", { id }))).not.toContain("Happy to take this.");
-  });
-
-  it("takes bids once the issue is ready (converted and confirmed), and a bid can be withdrawn", async () => {
+  it("takes bids once the issue is ready (converted and confirmed): summary and description required, a new bid replaces, replies and withdraw work", async () => {
+    await confirm(id, ["ada", "bob"]);
     // A confirmed issue is not offered automatically, so it is open to bids.
     expect(await offeredTo(id)).toBeNull();
-    const bid = await ok("eli", "volunteer", { id, note: "I can fix this today." });
+    // A bare bid is refused: every entry explains itself.
+    const { projectId } = (await ok("eli", "get-issue", { id })).issue;
+    const bare = await ziki("request", "POST", `/api/v1/issues/${id}/bid?projectId=${projectId}`, "--body", JSON.stringify({}), "--as", "eli");
+    expect(bare.code).toBe(1);
+    expect(bare.json?.status).toBe(400);
+    expect(bare.out + bare.err).toMatch(/summary/);
+    const bid = await ok("eli", "bid", { id, summary: "I can fix this today.", description: "The list query drops rows after a deploy; I will fix the cache key and add a test." });
     expect(bid.bid_id).toBeTruthy();
-    expect(JSON.stringify(await ok("cara", "list-bids", { id }))).toContain(bid.bid_id);
+    expect(bid.replaced).toBe(false);
+    // Bidding again replaces the same bid.
+    const again = await ok("eli", "bid", { id, summary: "I can fix this within the hour.", description: "Same plan, sooner." });
+    expect(again).toMatchObject({ bid_id: bid.bid_id, replaced: true, summary: "I can fix this within the hour." });
+    const reply = await ok("cara", "comment", { id, body: "Please include a regression test.", bidId: bid.bid_id });
+    expect(reply.comment).toMatchObject({ bidId: bid.bid_id, parentId: null });
+    // Replies read newest-first and from the start, like any comment.
+    expect(JSON.stringify(await ok("ada", "list-comments", { id }))).toContain("Please include a regression test.");
+    const listed = JSON.stringify(await ok("cara", "list-bids", { id }));
+    expect(listed).toContain(bid.bid_id);
+    expect(listed).toContain("I can fix this within the hour.");
+    expect(listed).toContain("Please include a regression test.");
     await ok("eli", "withdraw-bid", { id });
     expect(JSON.stringify(await ok("cara", "list-bids", { id }))).not.toContain(bid.bid_id);
   });
 
-  it("says direct claiming is retired and points to offers and bids", async () => {
-    await refused("bob", "claim-issue", { id }, 410);
+  it("takes comments on the issue itself while it is Open, and one-level replies to them", async () => {
+    const { comment } = await ok("bob", "comment", { id, body: "Still blank on Firefox 131 after the deploy." });
+    expect(comment).toMatchObject({ parentId: null, bidId: null, confirmationId: null });
+    const { comment: reply } = await ok("cara", "comment", { id, body: "Thanks, that narrows it down.", parentId: comment.id });
+    expect(reply.parentId).toBe(comment.id);
+    // Replies are one level deep.
+    await refused("ada", "comment", { id, body: "Me too.", parentId: reply.id }, 422);
+    // One place per comment.
+    await refused("ada", "comment", { id, body: "Me too.", parentId: comment.id, confirmationId: "c0000000000000000000000000" }, 422);
   });
 
-  it("releases a claim it no longer wants, so the issue can be offered again", async () => {
-    const { offer } = await ok("bob", "request-offer", { id });
-    const holder = (await Promise.all((["ada", "bob", "cara", "dana", "eli"] as const).map(async (agent) => [agent, (await ok(agent, "whoami")).id] as const))).find(
-      ([, agentId]) => agentId === offer.agentId,
-    )![0];
-    await ok(holder, "accept-offer", { id: offer.id });
-    const released = await ok(holder, "release-claim", { id, reason: "Out of time this week." });
-    expect(released.claimId).toBe(offer.id);
+  it("releases a claim it no longer wants, so the issue goes back to Open for bids", async () => {
+    // Offers come only from an awarded bid: bob bids, dana (a manager agent) awards it, bob accepts.
+    const bid = await ok("bob", "bid", { id, summary: "I can take this.", description: "I will fix the cache key and add a regression test." });
+    const awarded = await ok("dana", "award-bid", { id: bid.bid_id });
+    await ok("bob", "accept-offer", { id: awarded.claimId });
+    const released = await ok("bob", "release-claim", { id, reason: "Out of time this week." });
+    expect(released).toMatchObject({ claimId: awarded.claimId, reopened: true });
+    expect(released).not.toHaveProperty("reofferedTo");
+    // Nobody is offered it in turn.
+    expect(await offeredTo(id)).toBeNull();
+    expect((await ok("ada", "get-issue", { id })).issue).toMatchObject({ status: "open", holder: null });
   });
 
   it("asks the owner a question and reads it back", async () => {
@@ -106,7 +125,7 @@ describe("working on issues together", () => {
     // Ideas take verdicts; the feed lists the issue to confirm once converting creates it.
     const fresh = await fileIssue("ada", "CLI collaboration: needs confirming", ["bob", "cara", "eli"]);
     const item = await feedItem("bob", "confirm_issue", fresh);
-    expect(item?.actions?.map((action) => action.name)).toEqual(["validate_issue", "check_duplicate"]);
+    expect(item?.actions?.map((action) => action.name)).toEqual(["confirm_issue"]);
   });
 
   it("structures an agent's report, and marks a duplicate through structuring", async () => {
@@ -140,22 +159,39 @@ describe("working on issues together", () => {
     expect(attachmentId, JSON.stringify(uploaded)).toBeTruthy();
     const created = await ok("ada", "create-idea", {
       title: unique("CLI collaboration: with a screenshot"),
+      summary: "The page shows an error instead of loading.\nThe screenshot shows the message.",
       description: "Steps: open it. Expected: it works. Actual: see the screenshot.",
       attachmentIds: [attachmentId],
       acknowledgeSimilar: true,
     });
     expect(JSON.stringify(created.idea.attachments)).toContain(attachmentId);
+    // The short summary is kept, for people to read at a glance (#report-summary).
+    expect(created.idea.summary).toBe("The page shows an error instead of loading.\nThe screenshot shows the message.");
+  });
+
+  it("needs a short plain summary on every report (#report-summary)", async () => {
+    const missing = await ziki("create-idea", "--title", unique("CLI collaboration: no summary"), "--description", "Steps: open it. Expected: it works. Actual: it fails.", "--as", "ada");
+    expect(missing.code).toBe(2);
+    expect(missing.err).toMatch(/--summary/);
+    const markdown = await refused("ada", "create-idea", {
+      title: unique("CLI collaboration: markdown summary"),
+      summary: "## Bug\n**Save** does nothing on the page.",
+      description: "Steps: open it. Expected: it works. Actual: it fails.",
+      acknowledgeSimilar: true,
+    }, 422);
+    expect(JSON.stringify(markdown)).toMatch(/plain text/);
   });
 
   it("warns before filing a report like an open idea, and files it once acknowledged", async () => {
     const title = unique("CLI collaboration: duplicate check");
     const description = "Steps: open the page and press Save. Expected: it saves. Actual: nothing happens.";
-    await ok("ada", "create-idea", { title, description, acknowledgeSimilar: true });
+    const summary = "Pressing Save on the page does nothing.";
+    await ok("ada", "create-idea", { title, summary, description, acknowledgeSimilar: true });
     const idempotencyKey = randomUUID();
-    const warned = await refused("bob", "create-idea", { title, description, idempotencyKey }, 409);
+    const warned = await refused("bob", "create-idea", { title, summary, description, idempotencyKey }, 409);
     expect(warned.error).toBe("similar_issues");
     expect(warned.matches[0]).toMatchObject({ title, kind: "idea" });
-    const filed = await ok("bob", "create-idea", { title, description, idempotencyKey, acknowledgeSimilar: true });
+    const filed = await ok("bob", "create-idea", { title, summary, description, idempotencyKey, acknowledgeSimilar: true });
     expect(filed.idea.title).toBe(title);
   });
 });

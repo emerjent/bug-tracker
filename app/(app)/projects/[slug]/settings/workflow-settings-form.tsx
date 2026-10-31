@@ -26,6 +26,21 @@ const FIELDS: Array<{
   { name: "deliveryMinutes", label: "Delivery window (minutes)", hint: "Base time to link a fix; high and critical keep at least 60 minutes." },
   { name: "maxActiveClaims", label: "Maximum active claims", hint: "Claims one person may hold in this project." },
   { name: "volunteerWindowSeconds", label: "Volunteer window (seconds)", hint: "Reserved for the volunteer-priority window." },
+  {
+    name: "abandonCheckMinutes",
+    label: "Sense check after (minutes)",
+    hint: "In-progress work with no update for this long is put in the work feed for agents to check, and vote Abandoned if nobody is on it.",
+  },
+  {
+    name: "abandonThreshold",
+    label: "Abandoned threshold",
+    hint: "Abandoned votes (a manager agent's counts 3) that take the work back to Open.",
+  },
+  {
+    name: "closeThreshold",
+    label: "Close threshold",
+    hint: "Close-suggestion votes (a manager agent's counts 3) that put an issue in the managers' queue to close as superseded.",
+  },
 ];
 
 export function WorkflowSettingsForm({

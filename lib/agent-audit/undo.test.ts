@@ -10,7 +10,7 @@ const db = vi.hoisted(() => ({
   membership: { findUnique: vi.fn() },
   user: { findUnique: vi.fn() },
   agent: { findFirst: vi.fn() },
-  issueValidation: { findUnique: vi.fn() },
+  issueConfirmation: { findUnique: vi.fn(), update: vi.fn() },
   bug: { findUnique: vi.fn(), update: vi.fn() },
   pointEntry: { findFirst: vi.fn() },
   $transaction: vi.fn(),
@@ -33,14 +33,12 @@ const baseEvent = (overrides: Record<string, unknown> = {}) => ({
   id: eventId,
   tenantId,
   agentId: "agent-1",
-  action: "issue.validated",
+  action: "issue.confirmation",
   target: "bug:bug-1",
   bugId: "bug-1",
   payload: {
-    validationId: "val-1",
+    confirmationId: "val-1",
     confirmed: true,
-    severity: "high",
-    previousSeverity: "medium",
   },
   undoneAt: null,
   agent: { ownerUserId: "user-agent-owner" },
@@ -74,7 +72,7 @@ describe("undoAuditEvent (#450)", () => {
       { agentId: "agent-admin", tenantId },
       "agent.undone",
       `audit:${eventId}`,
-      expect.objectContaining({ undoneEventId: eventId, originalAction: "issue.validated" }),
+      expect.objectContaining({ undoneEventId: eventId, originalAction: "issue.confirmation" }),
       expect.objectContaining({ bugId: "bug-1", actorUserId: actor }),
     );
   });
@@ -94,20 +92,19 @@ describe("undoAuditEvent (#450)", () => {
     expect(correct).not.toHaveBeenCalled();
   });
 
-  it("restores the severity the validation set", async () => {
+  it("marks the confirmation undone and changes nothing else on a confirmed issue (#issue-confirmations)", async () => {
     db.bug.findUnique.mockResolvedValue({
       id: "bug-1",
       tenantId,
       beneficiaryUserId: "user-beneficiary",
       reporterId: "user-reporter",
     });
-    db.issueValidation.findUnique.mockResolvedValue({
+    db.issueConfirmation.findUnique.mockResolvedValue({
       id: "val-1",
       bugId: "bug-1",
-      kind: "real",
-      verdict: "accept",
-      severity: "high",
-      previousSeverity: "medium",
+      verdict: "confirm",
+      undoneAt: null,
+      updatedAt: new Date("2026-12-04T10:00:00.000Z"),
     });
 
     await undoAuditEvent(db as unknown as PrismaClient, {
@@ -116,26 +113,58 @@ describe("undoAuditEvent (#450)", () => {
       tenantId,
     });
 
-    expect(db.bug.update).toHaveBeenCalledWith({
-      where: { id: "bug-1" },
-      data: { severity: "medium" },
-    });
+    expect(db.issueConfirmation.update).toHaveBeenCalledWith({ where: { id: "val-1" }, data: { undoneAt: expect.any(Date) } });
+    expect(db.bug.update).not.toHaveBeenCalled();
   });
 
-  it("reverses the reporter points when the validation confirmed the issue", async () => {
+  it("leaves an entry given again since the audited one alone", async () => {
+    db.agentAuditEvent.findUnique.mockResolvedValue(
+      baseEvent({ payload: { confirmationId: "val-1", entryAt: "2026-12-04T09:00:00.000Z", confirmed: true } }),
+    );
+    db.issueConfirmation.findUnique.mockResolvedValue({
+      id: "val-1",
+      bugId: "bug-1",
+      verdict: "confirm",
+      undoneAt: null,
+      updatedAt: new Date("2026-12-04T10:00:00.000Z"),
+    });
+
+    const result = await undoAuditEvent(db as unknown as PrismaClient, { auditEventId: eventId, actorUserId: actor, tenantId });
+
+    expect(result).toMatchObject({ ok: true, message: expect.stringContaining("given again") });
+    expect(db.issueConfirmation.update).not.toHaveBeenCalled();
+    expect(db.bug.update).not.toHaveBeenCalled();
+    expect(correct).not.toHaveBeenCalled();
+  });
+
+  it("sends an Open issue that is no longer confirmed back to Requires confirmation", async () => {
+    db.issueConfirmation.findUnique.mockResolvedValue({
+      id: "val-1",
+      bugId: "bug-1",
+      verdict: "confirm",
+      undoneAt: null,
+      updatedAt: new Date("2026-12-04T10:00:00.000Z"),
+    });
+    db.bug.findUnique.mockResolvedValue({ id: "bug-1", tenantId, beneficiaryUserId: null, reporterId: "user-reporter", status: "open" });
+
+    await undoAuditEvent(db as unknown as PrismaClient, { auditEventId: eventId, actorUserId: actor, tenantId });
+
+    expect(db.bug.update).toHaveBeenCalledWith({ where: { id: "bug-1" }, data: { status: "requires_confirmation" } });
+  });
+
+  it("reverses the reporter points when the confirmation confirmed the issue", async () => {
     db.bug.findUnique.mockResolvedValue({
       id: "bug-1",
       tenantId,
       beneficiaryUserId: "user-beneficiary",
       reporterId: "user-reporter",
     });
-    db.issueValidation.findUnique.mockResolvedValue({
+    db.issueConfirmation.findUnique.mockResolvedValue({
       id: "val-1",
       bugId: "bug-1",
-      kind: "real",
-      verdict: "accept",
-      severity: "high",
-      previousSeverity: "medium",
+      verdict: "confirm",
+      undoneAt: null,
+      updatedAt: new Date("2026-12-04T10:00:00.000Z"),
     });
     db.pointEntry.findFirst.mockResolvedValue({
       id: "entry-1",
@@ -162,17 +191,16 @@ describe("undoAuditEvent (#450)", () => {
     );
   });
 
-  it("does not reverse points when the validation did not confirm", async () => {
+  it("does not reverse points when the entry did not confirm", async () => {
     db.agentAuditEvent.findUnique.mockResolvedValue(
-      baseEvent({ payload: { validationId: "val-1", confirmed: false } }),
+      baseEvent({ payload: { confirmationId: "val-1", confirmed: false } }),
     );
-    db.issueValidation.findUnique.mockResolvedValue({
+    db.issueConfirmation.findUnique.mockResolvedValue({
       id: "val-1",
       bugId: "bug-1",
-      kind: "real",
       verdict: "reject",
-      severity: null,
-      previousSeverity: null,
+      undoneAt: null,
+      updatedAt: new Date("2026-12-04T10:00:00.000Z"),
     });
 
     await undoAuditEvent(db as unknown as PrismaClient, {

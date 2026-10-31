@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import type { AgentContext } from "@/lib/agents/require-agent";
 import { requireLevel } from "@/lib/agents/levels";
 import { IssueApiError } from "@/lib/agent-api/errors";
-import { isConfirmed } from "@/lib/agent-api/validation";
+import { isConfirmed } from "@/lib/agent-api/confirmations";
 import { publish } from "@/lib/agent-api/events";
 import { acceptOffer, isOfferExpired, scheduleOfferExpiry } from "@/lib/agent-api/offer";
 import { notifyClaimOffered } from "@/lib/agent-notifications";
@@ -32,8 +32,8 @@ export type AssignInput = z.infer<typeof assignSchema>;
  * A manager or merger agent gives a ready issue to an agent it chooses, or to
  * itself (#715). The issue must be open, converted and confirmed, with no
  * active claim or live offer; the target must be an active agent in the
- * tenant whose owner is under the project's active-claim cap. The same gates
- * as `offerIssue` apply. Assigning to someone else credits the manager's owner
+ * tenant whose owner is under the project's active-claim cap. The redesign and
+ * before-offer approval gates apply. Assigning to someone else credits the manager's owner
  * as dispatcher; assigning to self does not.
  */
 export async function assignIssue(manager: AgentContext, projectId: string, issueRef: string, input: AssignInput) {

@@ -8,14 +8,13 @@ import { agentMentionId } from "@/lib/mentions";
 import { requireUser } from "@/lib/auth-helpers";
 import { bugInTenant, currentTenantIdFor } from "@/lib/tenant-context";
 import { viewerBugScope } from "@/lib/tenant-viewer";
-import { ideaPath, issuePath, parseIssueRef, queryString, resolveIssueRef } from "@/lib/issue-ref";
+import { issuePath, parseIssueRef, queryString, resolveIssueRef } from "@/lib/issue-ref";
 import { resolveSessionUserId } from "@/lib/session-user";
 import { LocalTime } from "@/components/local-time";
 import { ClearDuplicateButton, MarkDuplicateButton } from "@/components/duplicate-controls";
 import { currentResolution, isFinishedStatus, type StatusChangeActivity } from "@/lib/resolution-note";
 import { statusLabel as resolutionStatusLabel } from "@/lib/labels";
 import { formatIssueNumber } from "@/lib/issue-number";
-import { openIssueConfirmations, stageDetail, type IssueConfirmation, type IssueStage } from "@/lib/issue-stage";
 import { buildCommentTree } from "@/lib/comments";
 import {
   COMMENT_PARAM,
@@ -33,48 +32,47 @@ import {
 import { absoluteUrl } from "@/lib/site-url";
 import { SHARE_IMAGE } from "@/lib/share-image";
 import {
-  severityLabels,
   statusLabels,
 } from "@/lib/labels";
 import { ActivityTimeline, type ActivityEntry } from "@/components/activity-timeline";
 import { type AgentDecision } from "@/components/issue-agent-activity";
 import { IssueProgressReport } from "@/components/issue-progress-report";
 import { IssueStageProvider } from "@/components/issue-stage-context";
-import { IssueStageSummary } from "@/components/issue-stage-summary";
-import { StageCommentThread, StageConversationCount } from "@/components/stage-comment-thread";
+import { IssueComments } from "@/components/comment-thread";
+import { CommentComposer } from "@/components/comment-composer";
+import { AwardBox } from "@/components/award-box";
+import { currentHold, type IssueHold } from "@/lib/issue-holders";
 import {
   claimDecisionKind,
   currentDecisionStage,
   payloadMerged,
-  stageOfComment,
-  stageStarts,
-  type DecisionStage,
+  stageSetback,
 } from "@/lib/decision-stages";
 import { IssueEscalations, type TicketEscalation } from "@/components/issue-escalations";
 import { listBugEscalations } from "@/lib/agent-questions";
-import { IssueBids } from "@/components/issue-bids";
-import { GoalBudgetSection } from "@/components/goal-budgets";
+import { IssueBidsPanel, type BidEntryView } from "@/components/issue-bids";
+import { bidHistoryEntries } from "@/lib/agent-api/bid";
+import { testVerdictEntries } from "@/lib/agent-api/test-verdict";
+import { deliveryEntries } from "@/lib/agent-api/delivery";
+import { mergeReviewEntries } from "@/lib/agent-api/merge";
+import { DeliveriesPanel, MergeReviewsPanel, TestVerdictsPanel, type DeliveryView, type MergeReviewView, type TestVerdictView } from "@/components/issue-review-entries";
 import { Badge } from "@/components/ui/badge";
 import { VoteButton } from "@/components/vote-button";
-import { type IdeaVerdictsData } from "@/components/idea-verdicts";
-import { listIdeaVerdicts } from "@/lib/agent-api/idea-verdicts";
-import { UpdateIssueForm } from "@/components/update-issue-form";
-import { AddCommentDialog } from "@/components/add-comment-dialog";
-import type { DisputeRole } from "@/components/comment-form";
+import { IssueConfirmationsPanel, type ConfirmationBlock, type ConfirmationsData } from "@/components/issue-confirmations";
+import { CONFIRMATION_SUMMARY_MAX_CHARS, listConfirmations } from "@/lib/agent-api/confirmations";
+import { DisputeAwardDialog, type DisputeRole } from "@/components/dispute-award-dialog";
 import { AttachmentList, type AttachmentView } from "@/components/attachment-list";
 import { ChooseRedesignButton } from "@/components/choose-redesign-button";
 import { IssueApprovalBanner } from "@/components/issue-approval-banner";
 import { isTenantAdminRole } from "@/lib/agents/membership";
 import type { OrganizationRole } from "@/lib/organization-role";
 import { UserNameWithBadges } from "@/components/user-name-with-badges";
-import { getActiveIssueTypesCached, getActivePlatforms } from "@/lib/lookups";
 import { fetchVoterSummary } from "@/lib/voter-summaries";
 import { createEmptyVoterSummary } from "@/lib/voters";
 import {
   canDeleteTicket,
   deletedSummary,
   deletionCounts,
-  deleteSummary,
 } from "@/lib/ticket-deletion";
 import { currentTenantAccess } from "@/lib/tenant-access";
 import { MilestoneDue } from "@/components/milestone-due";
@@ -86,22 +84,27 @@ import { DeleteIssueButton } from "@/components/delete-issue-button";
 import { RestoreIssueButton } from "@/components/restore-issue-button";
 import { canAssignTicket } from "@/lib/ticket-assignment";
 import { SelfAssignButton } from "@/components/self-assign-button";
+import { IssueActionsMenu } from "@/components/issue-actions-menu";
 import { EditableIssueDescription } from "@/components/editable-issue-description";
-import { EditableProofLinks } from "@/components/editable-proof-links";
-import { withCurrentOption } from "@/lib/triage-options";
+import { IssueLinks } from "@/components/issue-links";
+import { ReportSummary } from "@/components/report-summary";
+import { NextStepBar } from "@/components/next-step-bar";
+import { BackToList } from "@/components/back-to-list";
+import { issueNextStep } from "@/lib/next-step";
+import { staleHold, type StaleHold } from "@/lib/agent-api/stale-hold";
+import { senseCheck } from "@/lib/agent-api/abandon";
+import { closeSuggestionsFor, type CloseSuggestionsData } from "@/lib/agent-api/close-suggestions";
+import { CloseSuggestionsPanel } from "@/components/close-suggestions";
+import { workflowFor } from "@/lib/workflow";
 import { issueTenantHintFor } from "@/lib/issue-tenant-hint";
 import { IssueTenantSwitch } from "@/components/issue-tenant-hint";
 import { tenantMemberWhere } from "@/lib/tenant-mentions";
 import { readAgentResolution } from "@/lib/agent-resolution";
 import { AgentResolvedNotice } from "@/components/agent-resolved-notice";
-import { issueStageLabels } from "@/lib/issue-stage";
-import { ReviewStatusBadge } from "@/components/review-status-badge";
 import { SubmissionEvidence } from "@/components/submission-evidence";
 import { voteDirection } from "@/lib/voting";
 import {
   issueChipBaseClass,
-  issueSeverityChipClass,
-  issueStageChipClass,
   issueStatusChipClass,
 } from "./issue-ui";
 import "./issue-detail.css";
@@ -118,6 +121,21 @@ const NO_COMMENTS: CommentWindow = {
   visibleCount: 0,
 };
 
+/** The flags agents raised, listed under the status chip in the side rail (#close-superseded). */
+type StatusFlagTone = "bad" | "warn" | "info";
+
+const STALE_FLAG: Record<StaleHold["kind"], string> = {
+  offer_expired: "Stale: offer expired",
+  overdue: "Stale: overdue",
+  silent: "Stale: silent",
+};
+
+const FLAG_DOT: Record<StatusFlagTone, string> = {
+  bad: "bg-zk-bad-fg",
+  warn: "bg-zk-warn-fg",
+  info: "bg-zk-accent",
+};
+
 /** How much of the activity log a single page render is allowed to load. */
 const ACTIVITY_PAGE_SIZE = 50;
 
@@ -128,13 +146,6 @@ async function loadOptional<T>(label: string, fallback: T, load: () => Promise<T
     console.error(`[issue] ${label} failed`, error);
     return fallback;
   }
-}
-
-/** A manager agent's rejection notes (#1429), from its audit payload. */
-function payloadNotes(payload: unknown): string | null {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const notes = (payload as { notes?: unknown }).notes;
-  return typeof notes === "string" && notes.trim() ? notes : null;
 }
 
 /** Why a merger agent's deployment failed (#1446), from its audit payload. */
@@ -210,8 +221,9 @@ export async function generateMetadata({
 }
 
 /**
- * Renders the issue detail page including discussion threads, activity
- * timeline, attachment viewer, and triage controls.
+ * Renders the issue detail page: the Conversation (who has it, its stage
+ * entries), the comments in a card of their own, the activity timeline and
+ * the attachments.
  *
  * Performance optimization (#349): Gating the full user directory query behind
  * `canTriage` ensures non-triage viewers do not run unnecessary database queries.
@@ -228,7 +240,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
 
   // Unauthenticated link-preview bots get the title and status only (#117).
   // They're recognised by User-Agent, which anyone can fake, so nothing more
-  // sensitive (reporter, severity, description) may appear here.
+  // sensitive (reporter, description) may appear here.
   if (!userId) {
     // A bare number needs the viewer's organisation, so a signed-out preview
     // can only resolve the internal id (#457).
@@ -237,7 +249,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       select: {
         title: true,
         status: true,
-        reviewStatus: true,
         isDeleted: true,
       },
     });
@@ -251,7 +262,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           <Badge className={`${issueChipBaseClass} ${issueStatusChipClass[bug.status]}`}>
             {statusLabels[bug.status]}
           </Badge>
-          <ReviewStatusBadge status={bug.reviewStatus} />
         </div>
         <Link
           href={`/login?callbackUrl=${encodeURIComponent(`/issues/${rawId}`)}`}
@@ -278,19 +288,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     permanentRedirect(`${issuePath(found.number)}${queryString(query)}${comment ? `#comment-${comment}` : ""}`);
   }
   const id = found?.id ?? (ref.kind === "id" ? ref.id : "");
-  // #289: open milestones for the triage panel (admins only). Started here,
-  // alongside the issue query, and awaited where the form needs them.
-  const milestoneOptionsPromise: Promise<{ id: string; title: string; isClosed: boolean }[]> = canTriage
-    ? loadOptional("milestones", [], () =>
-        userTenantId
-          ? prisma.milestone.findMany({
-              where: { isClosed: false, tenantId: userTenantId },
-              select: { id: true, title: true, isClosed: true },
-              orderBy: [{ dueDate: { sort: "asc", nulls: "last" } }, { title: "asc" }],
-            })
-          : Promise.resolve([]),
-      )
-    : Promise.resolve([]);
 
   // The list page already proved the issue row itself can be read. Comments,
   // the activity log, watches and attachments are newer tables. One of them
@@ -302,7 +299,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
         type: { select: { id: true, name: true, isActive: true } },
         reporter: { select: { name: true, email: true, role: true, image: true } },
         createdByAgent: { select: { id: true, name: true, ownerUserId: true } },
-        idea: { select: { id: true, number: true, convertedAt: true } },
+        idea: { select: { id: true, number: true, convertedAt: true, _count: { select: { verdicts: true } } } },
         milestone: { select: { id: true, title: true, dueDate: true, isClosed: true } },
         assignee: { select: { id: true, name: true, role: true, image: true } },
         category: { select: { id: true, name: true, isActive: true } },
@@ -337,7 +334,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           type: { select: { id: true, name: true, isActive: true } },
           reporter: { select: { name: true, email: true, role: true, image: true } },
           createdByAgent: { select: { id: true, name: true, ownerUserId: true } },
-          idea: { select: { id: true, number: true, convertedAt: true } },
+          idea: { select: { id: true, number: true, convertedAt: true, _count: { select: { verdicts: true } } } },
           assignee: { select: { id: true, name: true, role: true, image: true } },
           category: { select: { id: true, name: true, isActive: true } },
           area: { select: { id: true, name: true } },
@@ -403,28 +400,17 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     ),
   ]) : [[], null] as const;
   const canChooseRedesign = isTenantAdminRole(membership?.role, user.role);
-  const openBids = await loadOptional("bids", [], () =>
-    prisma.issueBid.findMany({
-      where: { bugId: bug.id, withdrawnAt: null, awardedAt: null },
-      orderBy: { createdAt: "asc" },
-      select: {
-        id: true,
-        note: true,
-        createdAt: true,
-        beneficiaryUserId: true,
-        agent: { select: { name: true, areaPreferences: {
-          where: { projectAreaId: bug.areaId ?? "" },
-          select: { projectAreaId: true },
-        } } },
-        beneficiary: { select: { name: true } },
-      },
-    }),
-  );
-  const hasAreaMatch = (bid: { agent: { areaPreferences: unknown[] } }) =>
-    Boolean(bug.areaId && bid.agent.areaPreferences.length);
-  const canAwardBid = bug.status === "open" && !bug.isDeleted && (bug.reporterId === user.id || canChooseRedesign);
+  // Once an issue is past Requires confirmation, the Conversation opens on who
+  // has it (its claims), then every bid it took (#issue-bids).
+  const pastConfirmation = bug.status !== "requires_confirmation";
+  const [hold, bidList] = pastConfirmation
+    ? await Promise.all([
+        loadOptional<IssueHold | null>("holder", null, () => currentHold(bug.id)),
+        loadOptional<BidEntryView[]>("bids", [], () => bidHistoryEntries({ id: bug.id, areaId: bug.areaId ?? null })),
+      ])
+    : [null as IssueHold | null, [] as BidEntryView[]];
 
-  const [users, categories, areas, types, voterSummary, activities, activityCount, comments, latestStatusChange, attachments, lastRevision, agentDecisions, escalations, volunteerCount, pendingApproval] =
+  const [users, voterSummary, activities, activityCount, comments, latestStatusChange, attachments, lastRevision, agentDecisions, escalations, pendingApproval] =
     await Promise.all([
       canTriage
         ? loadOptional("users", [], () =>
@@ -436,15 +422,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
             }),
           )
         : Promise.resolve([]),
-      loadOptional("platforms", [], () => getActivePlatforms(bug.tenantId)),
-      canTriage
-        ? loadOptional("project areas", [], () => prisma.projectArea.findMany({
-            where: { projectId: bug.projectId },
-            orderBy: [{ name: "asc" }, { id: "asc" }],
-            select: { id: true, name: true },
-          }))
-        : Promise.resolve([]),
-      canTriage ? loadOptional("types", [], () => getActiveIssueTypesCached(bug.tenantId)) : Promise.resolve([]),
       loadOptional("votes", createEmptyVoterSummary(), () => fetchVoterSummary(id)),
       loadOptional("activity", [] as ActivityEntry[], () =>
         prisma.bugActivity.findMany({
@@ -497,19 +474,25 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
         "agent decisions",
         [],
         async () => {
-          const [validations, claims, verdicts, accepted] = await Promise.all([
-            prisma.issueValidation.findMany({
-              where: { bugId: id, kind: "real" },
-              orderBy: { createdAt: "asc" },
+          const [confirmations, deliveries, claims, verdicts, reviews, accepted] = await Promise.all([
+            // #issue-confirmations: confirm and reject entries; neutral decides nothing.
+            prisma.issueConfirmation.findMany({
+              where: { bugId: id, verdict: { in: ["confirm", "reject"] }, undoneAt: null },
+              orderBy: { updatedAt: "asc" },
               select: {
                 id: true,
-                createdAt: true,
+                updatedAt: true,
                 verdict: true,
-                severity: true,
-                notes: true,
+                summary: true,
                 agent: { select: { name: true } },
                 onBehalfOf: { select: { name: true } },
               },
+            }),
+            // #delivered-step: each delivery of the work.
+            prisma.delivery.findMany({
+              where: { bugId: id },
+              orderBy: { updatedAt: "asc" },
+              select: { id: true, updatedAt: true, agent: { select: { name: true } }, beneficiary: { select: { name: true } } },
             }),
             // #1446: released claims too; a claim released for any reason but
             // the fix landing counts as a rejected claim at the Open stage.
@@ -541,10 +524,15 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                 onBehalfOf: { select: { name: true } },
               },
             }),
-            // #1429: a manager agent's rejection is a merge decision too, and #1446 a
-            // merger agent's failed deployment.
+            // #review-entries: a manager agent's accept or reject (#1429) is its merge review.
+            prisma.mergeReview.findMany({
+              where: { bugId: id },
+              orderBy: { createdAt: "asc" },
+              select: { id: true, createdAt: true, verdict: true, summary: true, agent: { select: { name: true } } },
+            }),
+            // #1446: the merger agent's merge and its failed deployments are actions, in the audit log.
             prisma.agentAuditEvent.findMany({
-              where: { bugId: id, action: { in: ["issue.accepted", "issue.merge_rejected", "github.merge_failed"] } },
+              where: { bugId: id, action: { in: ["issue.accepted", "github.merge_failed"] } },
               orderBy: { createdAt: "asc" },
               select: {
                 id: true,
@@ -556,18 +544,16 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
             }),
           ]);
 
-          const mergerDecisions: AgentDecision[] = accepted
-            .filter((e) => e.agent.level === "manager" || e.agent.level === "merger")
-            .map<AgentDecision>((e) =>
-              e.action === "issue.merge_rejected"
-                ? {
-                    id: `merge-rejected-${e.id}`,
-                    at: e.createdAt,
-                    kind: "merge_rejected",
-                    agentName: e.agent.name,
-                    notes: payloadNotes(e.payload),
-                  }
-                : e.action === "github.merge_failed"
+          const mergerDecisions: AgentDecision[] = [
+            ...reviews.map<AgentDecision>((r) =>
+              r.verdict === "reject"
+                ? { id: `merge-review-${r.id}`, at: r.createdAt, kind: "merge_rejected", agentName: r.agent.name, notes: r.summary }
+                : { id: `merge-review-${r.id}`, at: r.createdAt, kind: "accepted", agentName: r.agent.name },
+            ),
+            ...accepted
+              .filter((e) => e.action === "github.merge_failed" || payloadMerged(e.payload))
+              .map<AgentDecision>((e) =>
+                e.action === "github.merge_failed"
                   ? {
                       id: `deploy-failed-${e.id}`,
                       at: e.createdAt,
@@ -575,33 +561,28 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                       agentName: e.agent.name,
                       reason: payloadReason(e.payload),
                     }
-                  : {
-                      id: `accepted-${e.id}`,
-                      at: e.createdAt,
-                      kind: "accepted",
-                      agentName: e.agent.name,
-                      merged: payloadMerged(e.payload),
-                    },
-            );
+                  : { id: `accepted-${e.id}`, at: e.createdAt, kind: "accepted", agentName: e.agent.name, merged: true },
+              ),
+          ];
 
           const otherDecisions: AgentDecision[] = [
-            ...validations.map<AgentDecision>((v) =>
+            // A person's own entry names them; an agent's names the agent, for its owner.
+            ...confirmations.map<AgentDecision>((v) =>
               v.verdict === "reject"
                 ? {
-                    id: `validation-${v.id}`,
-                    at: v.createdAt,
+                    id: `confirmation-${v.id}`,
+                    at: v.updatedAt,
                     kind: "rejected",
-                    agentName: v.agent.name,
-                    personName: v.onBehalfOf.name,
-                    notes: v.notes,
+                    agentName: v.agent?.name ?? v.onBehalfOf.name,
+                    personName: v.agent ? v.onBehalfOf.name : "",
+                    notes: v.summary,
                   }
                 : {
-                    id: `validation-${v.id}`,
-                    at: v.createdAt,
+                    id: `confirmation-${v.id}`,
+                    at: v.updatedAt,
                     kind: "confirmed",
-                    agentName: v.agent.name,
-                    personName: v.onBehalfOf.name,
-                    severity: v.severity,
+                    agentName: v.agent?.name ?? v.onBehalfOf.name,
+                    personName: v.agent ? v.onBehalfOf.name : "",
                   },
             ),
             ...claims.flatMap<AgentDecision>((c) => {
@@ -632,6 +613,13 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                 },
               ];
             }),
+            ...deliveries.map<AgentDecision>((d) => ({
+              id: `delivery-${d.id}`,
+              at: d.updatedAt,
+              kind: "delivered",
+              agentName: d.agent.name,
+              personName: d.beneficiary.name ?? "A member",
+            })),
             ...verdicts.map<AgentDecision>((v) => ({
               id: `verdict-${v.id}`,
               at: v.createdAt,
@@ -640,17 +628,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               personName: v.onBehalfOf.name,
               goodToMerge: v.goodToMerge,
             })),
-            ...accepted
-              .filter(
-                (e) =>
-                  e.action === "issue.accepted" && e.agent.level !== "manager" && e.agent.level !== "merger",
-              )
-              .map<AgentDecision>((e) => ({
-                id: `accepted-${e.id}`,
-                at: e.createdAt,
-                kind: "accepted",
-                agentName: e.agent.name,
-              })),
           ].sort((a, b) => {
             const at = new Date(a.at).getTime() - new Date(b.at).getTime();
             if (at !== 0) return at;
@@ -663,11 +640,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       ),
       loadOptional<TicketEscalation[]>("escalations", [], () =>
         tenantId ? listBugEscalations(id, tenantId) : Promise.resolve([]),
-      ),
-      loadOptional<number>("volunteers", 0, () =>
-        prisma.issueInterest.count({
-          where: { bugId: id, withdrawnAt: null, agent: { revokedAt: null } },
-        }),
       ),
       loadOptional("pendingApproval", null, () =>
         (typeof (prisma as { issueApproval?: unknown }).issueApproval !== "undefined"
@@ -704,24 +676,16 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
     if (a.commentId) (attachmentsByComment[a.commentId] ??= []).push(a);
   }
 
-  const milestoneOptions = await milestoneOptionsPromise;
-  let intakeStage: IssueStage | null = null;
-  let confirmation: IssueConfirmation | null = null;
-  if (!bug.isDeleted && bug.status === "open") {
-    try {
-      confirmation = (await openIssueConfirmations(prisma, { id: bug.id })).get(bug.id) ?? null;
-      intakeStage = confirmation?.stage ?? null;
-    } catch (error) {
-      console.error("[bugs] issue stage lookup failed", error);
-    }
-  }
-  // #idea-table: the verdicts of the idea this issue was converted from, for the Idea stage.
+  // #idea-table: the idea this issue was converted from.
   const sourceIdea = bug.idea;
-  const ideaVerdicts: IdeaVerdictsData | null = sourceIdea
-    ? await loadOptional<IdeaVerdictsData | null>("idea verdicts", null, () =>
-        listIdeaVerdicts({ tenantId: bug.tenantId, projectId: bug.projectId }, sourceIdea.id),
-      )
-    : null;
+  // #issue-confirmations: at Requires confirmation the issue takes confirmation
+  // entries; afterwards they stay, read-only, under the comments.
+  const confirming = !bug.isDeleted && bug.status === "requires_confirmation";
+  const confirmationsData: ConfirmationsData | null = await loadOptional<ConfirmationsData | null>("confirmations", null, () =>
+    listConfirmations({ tenantId: bug.tenantId, projectId: bug.projectId }, bug.id),
+  );
+  const confirmationBlock: ConfirmationBlock =
+    bug.reporterId === user.id || bug.beneficiaryUserId === user.id ? "own" : null;
   const isAssignee = !!userId && bug.assigneeId === userId;
   const canUpdateStatus = canTriage || isAssignee;
   const canEdit =
@@ -746,19 +710,33 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
       : 0;
   const commentTree = buildCommentTree(comments.comments);
   // #1446: the stage the page opens on, and what each stage holds.
-  const currentStage = currentDecisionStage({
-    status: bug.status,
-    reviewStatus: bug.reviewStatus,
-    pullRequestUrl: bug.pullRequestUrl,
-    hasClaim: agentDecisions.some((d) => d.kind === "claimed"),
-    ideaAccepted: intakeStage === "ready",
-  });
-  // When each stage began, so every comment lands in the stage it was posted in.
-  const starts = stageStarts(agentDecisions, sourceIdea?.convertedAt ?? null);
-  const stageCommentCounts: Record<DecisionStage, number> = { idea: 0, confirm: 0, open: 0, done: 0, ready: 0, live: 0 };
-  for (const comment of commentTree) {
-    stageCommentCounts[stageOfComment(comment.type, comment.createdAt, starts)] += 1;
-  }
+  const currentStage = currentDecisionStage({ status: bug.status });
+  // Sent back: the latest manager decision on the fix was a reject.
+  const latestMergeDecision = agentDecisions
+    .filter((d) => d.kind === "accepted" || d.kind === "merge_rejected")
+    .sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime())
+    .at(-1);
+  const sentBack = latestMergeDecision?.kind === "merge_rejected";
+  // #delivered-step: In progress takes the delivery, Delivered the judgements,
+  // Done (and Ready to merge) the merge reviews; not comments.
+  const reviewBug = { id: bug.id, pullRequestUrl: bug.pullRequestUrl ?? null, pullRequestHeadSha: bug.pullRequestHeadSha ?? null };
+  // Agents judge delivered work, and may change a judgement until a manager accepts it.
+  const testing = !bug.isDeleted && (currentStage === "delivered" || currentStage === "done");
+  // Managers review judged work (Done) and accepted work (Ready to merge).
+  const mergeReviewing = !bug.isDeleted && (currentStage === "done" || currentStage === "ready");
+  // Deliveries take replies while the work is being made or judged; they fold once it is past Delivered.
+  const delivering = currentStage === "progress" || currentStage === "delivered";
+  // Taken at their own stage; read-only afterwards.
+  const [deliveryList, testVerdictList, mergeReviewList] = pastConfirmation
+    ? await Promise.all([
+        loadOptional<DeliveryView[]>("deliveries", [], () => deliveryEntries(reviewBug)),
+        loadOptional<TestVerdictView[]>("test verdicts", [], () => testVerdictEntries(reviewBug)),
+        loadOptional<MergeReviewView[]>("merge reviews", [], () => mergeReviewEntries(reviewBug)),
+      ])
+    : [[] as DeliveryView[], [] as TestVerdictView[], [] as MergeReviewView[]];
+  // Comments on the issue itself: taken only while it is Open (lib/comment-placement.ts).
+  const takesComments = !bug.isDeleted && bug.status === "open";
+  const commentCount = comments.shownThreads + comments.hiddenThreads;
   // #489: the Admin label follows each person's role in this issue's
   // organization, not their account-wide role, the same rule as admin powers.
   const namedUserIds = [
@@ -799,7 +777,8 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
   const agentResolution =
     bug.status === "resolved" && !bug.isDeleted ? readAgentResolution(latestStatusChange?.metadata) : null;
 
-  // "Dispute award" is a type in the Add comment form, for the issue's reporter and assignee.
+  // "Dispute award", for the issue's reporter and assignee: its own button now
+  // that issues take no free-standing comments (#entry-replies-only).
   const disputeRoles: DisputeRole[] = bug.isDeleted
     ? []
     : [
@@ -807,33 +786,79 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
         ...(userId && bug.reporterId === userId ? (["reporter"] as const) : []),
       ];
 
-  const headerActions = (
-    <>
-      {canSelfAssign ? (
-        <SelfAssignButton
-          bugId={bug.id}
-          isAssignedToMe={isAssignee}
-          size="sm"
-        />
-      ) : null}
-      {canTriage && !bug.isDeleted && !bug.duplicateOf ? (
-        <MarkDuplicateButton bugId={bug.id} />
-      ) : null}
-    </>
-  );
-
-  const bidList = [...openBids]
-    .sort((a, b) => Number(hasAreaMatch(b)) - Number(hasAreaMatch(a)) || a.createdAt.getTime() - b.createdAt.getTime())
-    .map((bid) => ({
-      id: bid.id,
-      agentName: bid.agent.name,
-      personName: bid.beneficiary.name ?? "A member",
-      note: bid.note,
-      areaMatch: hasAreaMatch(bid),
-    }));
+  // Less common actions sit behind one icon at the top right: Mark as
+  // duplicate and Delete. "Assign to me" lives in the People panel.
+  const canMarkDuplicate = canTriage && !bug.isDeleted && !bug.duplicateOf;
+  const canDeleteHere = canDelete && !bug.isDeleted;
 
   // What a delete keeps, shown the same way in every delete/restore message (#692).
   const keptCounts = deletionCounts(comments.visibleCount, voterSummary);
+
+  // The next step, always shown under the progress report (#next-step).
+  const { verdictsNeeded } = await workflowFor(bug.projectId);
+  const stale = bug.isDeleted ? null : (await loadOptional("stale hold", null, () => staleHold(bug.id)))?.kind ?? null;
+  const abandonCheck = bug.isDeleted || bug.status !== "in_progress" ? null : await loadOptional("sense check", null, () => senseCheck(bug.id));
+  const closeSuggestions = await loadOptional<CloseSuggestionsData | null>("close suggestions", null, () => closeSuggestionsFor(bug.id));
+  const nextStep = issueNextStep({
+    status: bug.status,
+    isDeleted: bug.isDeleted,
+    confirmations: confirmationsData?.confirmations ?? 0,
+    confirmationsNeeded: confirmationsData?.confirmationsNeeded ?? 0,
+    holder: hold ? { agentName: hold.agentName, personName: hold.personName, status: hold.status, offeredAt: hold.offeredAt } : null,
+    openBids: bidList.filter((bid) => !bid.awardedAt && !bid.withdrawnAt).length,
+    goodToMerge: testVerdictList.filter((verdict) => verdict.goodToMerge).length,
+    verdictsNeeded,
+    stale,
+    senseCheck: abandonCheck,
+    closeSuggested: closeSuggestions && closeSuggestions.entries.length > 0
+      ? { votes: closeSuggestions.votes, threshold: closeSuggestions.threshold }
+      : null,
+    closeReason: bug.closeReason,
+  });
+
+  // The flags agents raised, under the status chip in the side rail (#close-superseded).
+  const openBidVotes = bug.status === "open"
+    ? bidList.filter((bid) => !bid.awardedAt && !bid.withdrawnAt).reduce((sum, bid) => sum + (bid.votes ?? 0), 0)
+    : 0;
+  const statusFlags: { label: string; tone: StatusFlagTone }[] = bug.isDeleted
+    ? []
+    : [
+        ...(bug.status === "closed" && bug.closeReason === "superseded"
+          ? [{ label: "Closed as superseded", tone: "bad" as const }]
+          : closeSuggestions && closeSuggestions.votes > 0 && bug.status !== "closed" && bug.status !== "resolved"
+            ? [{ label: `Close suggested: superseded (${closeSuggestions.votes} of ${closeSuggestions.threshold})`, tone: "bad" as const }]
+            : []),
+        ...(abandonCheck ? [{ label: `Abandon votes: ${abandonCheck.votes} of ${abandonCheck.threshold}`, tone: "warn" as const }] : []),
+        ...(stale ? [{ label: STALE_FLAG[stale], tone: "bad" as const }] : []),
+        ...(openBidVotes > 0 ? [{ label: `${openBidVotes} bid ${openBidVotes === 1 ? "vote" : "votes"}`, tone: "info" as const }] : []),
+      ];
+
+  // The Conversation card shows only when it has entries in it: no empty boxes.
+  // Its Dispute award button alone is not enough (nothing to dispute before an award).
+  const conversationHasContent =
+    deliveryList.length > 0 ||
+    testing ||
+    testVerdictList.length > 0 ||
+    mergeReviewing ||
+    mergeReviewList.length > 0 ||
+    pastConfirmation;
+
+  // The confirmations, apart from the Conversation: above the Conversation while
+  // they decide the issue, below it (as history) once it is past them.
+  const confirmationsCard =
+    confirmationsData && (confirming || (pastConfirmation && confirmationsData.entries.length > 0)) ? (
+      <div className="[&>*]:mb-0">
+        <IssueConfirmationsPanel
+          bugId={bug.id}
+          data={confirmationsData}
+          viewerId={user.id}
+          block={confirming ? confirmationBlock : null}
+          summaryMaxChars={CONFIRMATION_SUMMARY_MAX_CHARS}
+          history={!confirming}
+          confirmed={!confirming}
+        />
+      </div>
+    ) : null;
 
   return (
     <div className="issue-detail-scope flex flex-col gap-5 pb-10">
@@ -873,7 +898,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               </Link>
             )}{" "}
             <span>({statusLabels[bug.duplicateOf.status]})</span>.{" "}
-            Follow and vote there instead. It&apos;s hidden from the issues list.
+            Follow it and mark it important there instead. It&apos;s hidden from the issues list.
           </p>
           {canTriage ? (
             <div className="flex shrink-0 items-center gap-1 print:hidden">
@@ -957,21 +982,13 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
         </section>
       ) : null}
 
-      {/* Header: number + title, status language, vote */}
+      {/* Header: number + title, status language, importance */}
       <div className="flex flex-col gap-3.5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0 flex-[1_1_600px] space-y-3">
             <div className="flex items-start gap-2">
-              <Link
-                href="/issues"
-                aria-label="Back to issues"
-                title="Back to issues"
-                className="mt-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zk-accent hover:bg-zk-chip print:hidden"
-              >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <path d="M19 12H5M12 19l-7-7 7-7" />
-                </svg>
-              </Link>
+              {/* Back to the list it was opened from; otherwise the list for its status. */}
+              <BackToList fallback={`/issues?status=${bug.status}`} label="Back to issues" />
               <h1 className="min-w-0 break-words text-[28px] font-extrabold leading-tight tracking-[-0.02em] text-zk-text">
                 <span className="font-bold tabular-nums text-zk-muted">
                   {formatIssueNumber(bug.number)}
@@ -984,15 +1001,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               <AgentResolvedNotice bugId={bug.id} resolution={agentResolution} canReopen={canUpdateStatus} />
             ) : null}
 
-            {/* On mobile (<sm): compact horizontal scroll action row pinned directly under the title (#698) */}
-            <div
-              data-testid="mobile-actions-row"
-              className="flex items-center gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden sm:hidden print:hidden"
-            >
-              {headerActions}
-            </div>
-
-            {/* Taxonomy (#687). Status, severity, stage and the opened date are in the Status box. */}
+            {/* Taxonomy (#687). Status, stage and the opened date are in the Status box. */}
             {bug.type || bug.category ? (
               <p className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-zk-muted">
                 {bug.type ? (
@@ -1006,7 +1015,6 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           </div>
 
           <div className="flex shrink-0 flex-wrap items-center gap-2 self-start print:hidden">
-            <div className="hidden sm:contents">{headerActions}</div>
             <VoteButton
               bugId={bug.id}
               voteCount={bug.voteCount}
@@ -1017,6 +1025,14 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               showAvatars={false}
               readOnly={bug.isDeleted}
             />
+            {canMarkDuplicate || canDeleteHere ? (
+              <IssueActionsMenu>
+                {canMarkDuplicate ? <MarkDuplicateButton bugId={bug.id} /> : null}
+                {canDeleteHere ? (
+                  <DeleteIssueButton bugId={bug.id} bugTitle={bug.title} counts={keptCounts} variant="danger" size="sm" />
+                ) : null}
+              </IssueActionsMenu>
+            ) : null}
           </div>
         </div>
       </div>
@@ -1026,6 +1042,7 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
         <div className="flex min-w-0 flex-[999_1_600px] flex-col gap-5">
           {/* #1446: the progress report's stage filters the Conversation (#186). */}
           <IssueStageProvider initialStage={currentStage}>
+          <ReportSummary summary={bug.summary} />
           <EditableIssueDescription
             bugId={bug.id}
             initialTitle={bug.title}
@@ -1070,141 +1087,112 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
           {/* Progress report (#1446), where the summary strip was; its stage drives the Conversation card. */}
           <IssueProgressReport
             decisions={agentDecisions}
+            entryCounts={{
+              idea: sourceIdea?._count.verdicts ?? 0,
+              confirm: confirmationsData?.entries.length ?? 0,
+              open: bidList.length,
+              progress: deliveryList.length,
+              delivered: testVerdictList.length,
+              done: mergeReviewList.length,
+            }}
             currentStage={currentStage}
-            setback={bug.reviewStatus === "rejected"}
-            commentCounts={stageCommentCounts}
+            setback={stageSetback(currentStage, sentBack)}
           />
 
-              <section
-                id="conversation"
-                className="scroll-mt-24 rounded-[20px] border border-zk-border bg-zk-surface p-5 sm:p-[22px]"
-              >
-                <span id="comments" className="sr-only" aria-hidden="true" />
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <h2 className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.08em] text-zk-muted">
-                    Conversation
-                    <span className="font-mono font-normal normal-case tracking-normal">
-                      <StageConversationCount counts={stageCommentCounts} fallback={comments.visibleCount} />
-                    </span>
-                  </h2>
-                  {bug.isDeleted ? null : (
-                    <AddCommentDialog
-                      bugId={bug.id}
-                      users={commentMentionUsers}
-                      viewerId={user.id}
-                      bugNumber={bug.number}
-                      disputeRoles={disputeRoles}
-                    />
-                  )}
-                </div>
-                {/* #186: the picked stage's summary, in place of the Agent decisions card. */}
-                <IssueStageSummary
-                  decisions={agentDecisions}
-                  currentStage={currentStage}
-                  setback={bug.reviewStatus === "rejected"}
-                  pullRequestUrl={bug.pullRequestUrl}
-                  severity={bug.severity}
-                  ideaVerdicts={
-                    ideaVerdicts
-                      ? { score: ideaVerdicts.ideaScore, threshold: ideaVerdicts.ideaThreshold, votes: ideaVerdicts.votes }
-                      : undefined
-                  }
-                  confirmation={confirmation}
-                />
-                {comments.hiddenThreads > 0 ? (
-                  <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-zk-chip px-3 py-2 text-sm text-zk-text2 print:hidden">
-                    <span>
-                      {comments.hiddenThreads} earlier{" "}
-                      {comments.hiddenThreads === 1 ? "thread" : "threads"} not shown.
-                    </span>
-                    <Link
-                      href={earlierThreadsHref(pageQuery, comments.shownThreads)}
-                      scroll={false}
-                      className="font-bold text-zk-accent hover:underline"
-                    >
-                      Show {Math.min(comments.hiddenThreads, COMMENT_THREADS_PER_PAGE)} earlier
-                    </Link>
-                    {comments.hiddenThreads > COMMENT_THREADS_PER_PAGE ? (
-                      <Link
-                        href={earlierThreadsHref(pageQuery, comments.shownThreads, true)}
-                        scroll={false}
-                        className="font-bold text-zk-accent hover:underline"
-                      >
-                        Show all
-                      </Link>
-                    ) : null}
-                  </div>
-                ) : null}
-                <Suspense fallback={null}>
-                  <CommentPermalinkResolver />
-                </Suspense>
-                <StageCommentThread
-                  bugId={bug.id}
-                  issueUrl={absoluteUrl(issuePath(bug.number))}
-                  reporterId={bug.reporterId}
-                  comments={commentTree}
-                  attachmentsByComment={attachmentsByComment}
-                  organizationRoles={organizationRoles}
-                  users={commentMentionUsers}
-                  currentUserId={user.id}
-                  currentUserRole={user.role}
-                  tenantAdmin={access.admin}
-                  readOnly={bug.isDeleted}
-                  inlineComposer={false}
-                  stage={currentStage}
-                  stageStarts={starts}
-                />
-              </section>
+          <NextStepBar step={nextStep} />
 
-          {canUpdateStatus && !bug.isDeleted ? (
-            <UpdateIssueForm
-              bugId={bug.id}
-              status={bug.status}
-              severity={bug.severity}
-              typeId={bug.typeId}
-              assigneeId={bug.assigneeId}
-              categoryId={bug.categoryId}
-              areaId={bug.areaId}
-              users={users}
-              categories={withCurrentOption(categories, bug.category)}
-              areas={areas}
-              types={withCurrentOption(types, bug.type)}
-              milestoneId={bug.milestoneId}
-              milestones={
-                bug.milestone && !milestoneOptions.some((m) => m.id === bug.milestone?.id)
-                  ? [...milestoneOptions, { id: bug.milestone.id, title: bug.milestone.title, isClosed: bug.milestone.isClosed }]
-                  : milestoneOptions
-              }
-              canEditTriage={canTriage}
-            />
-          ) : null}
+              {/* Who has the issue, for an active claim only: a pending offer is in the next-step bar. */}
+              {hold?.status === "active" ? <AwardBox hold={hold} /> : null}
+
+              {confirming ? confirmationsCard : null}
+
+              {conversationHasContent ? (
+                <section
+                  id="conversation"
+                  className="scroll-mt-24 rounded-[20px] border border-zk-border bg-zk-surface p-5 sm:p-[22px]"
+                >
+                  <div className="flex justify-end empty:hidden">
+                    <DisputeAwardDialog bugNumber={bug.number} roles={disputeRoles} />
+                  </div>
+                  {deliveryList.length > 0 ? (
+                    <DeliveriesPanel bugId={bug.id} deliveries={deliveryList} canReply={!bug.isDeleted && delivering} collapsed={!delivering} />
+                  ) : null}
+                  {testing || testVerdictList.length > 0 ? (
+                    <TestVerdictsPanel bugId={bug.id} verdicts={testVerdictList} canReply={testing} history={!testing} />
+                  ) : null}
+                  {mergeReviewing || mergeReviewList.length > 0 ? (
+                    <MergeReviewsPanel bugId={bug.id} reviews={mergeReviewList} canReply={mergeReviewing} history={!mergeReviewing} />
+                  ) : null}
+                  {pastConfirmation ? (
+                    <IssueBidsPanel
+                      bids={bidList}
+                      collapsed={bug.status !== "open"}
+                      />
+                  ) : null}
+                </section>
+              ) : null}
+
+              {closeSuggestions ? <CloseSuggestionsPanel data={closeSuggestions} /> : null}
+
+              {!confirming ? confirmationsCard : null}
+
+              {/* Comments, apart from the stage entries (bids, deliveries) in the Conversation. */}
+              {takesComments || commentCount > 0 ? (
+                <section
+                  id="comments"
+                  aria-label="Comments"
+                  className="scroll-mt-24 rounded-[20px] border border-zk-border bg-zk-surface p-5 sm:p-[22px]"
+                >
+                  <IssueComments
+                    count={commentCount}
+                    composer={takesComments ? <CommentComposer bugId={bug.id} /> : null}
+                    replyBugId={takesComments ? bug.id : undefined}
+                    issueUrl={absoluteUrl(issuePath(bug.number))}
+                    reporterId={bug.reporterId}
+                    comments={commentTree}
+                    attachmentsByComment={attachmentsByComment}
+                    organizationRoles={organizationRoles}
+                    users={commentMentionUsers}
+                    currentUserId={user.id}
+                    currentUserRole={user.role}
+                    tenantAdmin={access.admin}
+                    readOnly={bug.isDeleted}
+                  >
+                    {comments.hiddenThreads > 0 ? (
+                      <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl bg-zk-chip px-3 py-2 text-sm text-zk-text2 print:hidden">
+                        <span>
+                          {comments.hiddenThreads} earlier{" "}
+                          {comments.hiddenThreads === 1 ? "thread" : "threads"} not shown.
+                        </span>
+                        <Link
+                          href={earlierThreadsHref(pageQuery, comments.shownThreads)}
+                          scroll={false}
+                          className="font-bold text-zk-accent hover:underline"
+                        >
+                          Show {Math.min(comments.hiddenThreads, COMMENT_THREADS_PER_PAGE)} earlier
+                        </Link>
+                        {comments.hiddenThreads > COMMENT_THREADS_PER_PAGE ? (
+                          <Link
+                            href={earlierThreadsHref(pageQuery, comments.shownThreads, true)}
+                            scroll={false}
+                            className="font-bold text-zk-accent hover:underline"
+                          >
+                            Show all
+                          </Link>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </IssueComments>
+                  <Suspense fallback={null}>
+                    <CommentPermalinkResolver />
+                  </Suspense>
+                </section>
+              ) : null}
+
 
           <IssueEscalations escalations={escalations} />
 
-          <Suspense fallback={null}>
-            <GoalBudgetSection tenantId={bug.tenantId} projectId={bug.projectId} bugId={bug.id} />
-          </Suspense>
 
-          {canDelete && !bug.isDeleted ? (
-            <section className="rounded-[20px] border border-zk-bad-bd bg-zk-bad-soft/60 p-4 sm:p-6 print:hidden">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div className="space-y-1">
-                  <h2 className="text-xs font-bold uppercase tracking-[0.08em] text-zk-bad-fg">
-                    Danger zone
-                  </h2>
-                  <p className="text-sm text-zk-text2">
-                    Delete this issue. {deleteSummary(keptCounts)}
-                  </p>
-                </div>
-                <DeleteIssueButton
-                  bugId={bug.id}
-                  bugTitle={bug.title}
-                  counts={keptCounts}
-                  variant="danger"
-                />
-              </div>
-            </section>
-          ) : null}
           </IssueStageProvider>
         </div>
 
@@ -1221,40 +1209,20 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                 <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden />
                 {statusLabels[bug.status]}
               </Badge>
-              <ReviewStatusBadge status={bug.reviewStatus} />
-              <Badge className={`${issueChipBaseClass} ${issueSeverityChipClass[bug.severity]}`}>
-                {severityLabels[bug.severity]}
-              </Badge>
-              {intakeStage ? (
-                // What the stage means stays one hover away now the note under the chips is gone.
-                <span
-                  title={stageDetail(intakeStage)} className="inline-flex">
-                  <Badge className={`${issueChipBaseClass} ${issueStageChipClass[intakeStage]}`}>
-                    {issueStageLabels[intakeStage]}
-                  </Badge>
-                </span>
-              ) : null}
-              {sourceIdea ? (
-                <Link
-                  href={ideaPath(sourceIdea.number)}
-                  data-testid="source-idea-link"
-                  className={`${issueChipBaseClass} bg-zk-chip text-zk-text2 hover:underline`}
-                >
-                  From idea #{sourceIdea.number}
-                </Link>
-              ) : null}
               {bug.isBoosted && !bug.isDeleted ? (
                 <span className={`${issueChipBaseClass} border border-zk-warn-bd bg-zk-warn-bg text-zk-warn-fg`}>Boosted</span>
               ) : null}
-              {volunteerCount > 0 ? (
-                <span className={`${issueChipBaseClass} bg-zk-info-bg text-zk-info-fg`}>
-                  {volunteerCount} {volunteerCount === 1 ? "agent volunteered" : "agents volunteered"}
-                </span>
-              ) : null}
             </div>
-            <p className="text-xs text-zk-muted">
-              Opened <LocalTime compact date={bug.createdAt} /> by {bug.reporter.name}
-            </p>
+            {statusFlags.length > 0 ? (
+              <ul data-testid="status-flags" className="m-0 flex list-none flex-col gap-1 p-0">
+                {statusFlags.map((flag) => (
+                  <li key={flag.label} className="flex items-center gap-1.5 text-xs text-zk-text2">
+                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${FLAG_DOT[flag.tone]}`} aria-hidden />
+                    {flag.label}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
           </section>
 
           {/* People, compact: one row each, label on the left. */}
@@ -1264,13 +1232,11 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
               <span className="w-16 shrink-0 text-xs text-zk-muted">Reporter</span>
               <UserNameWithBadges
                 name={bug.reporter.name}
-                role={bug.reporter.role}
-                organizationRole={organizationRoles[bug.reporterId]}
                 image={bug.reporter.image}
                 avatar="sm"
+                className="text-xs"
                 userId={bug.reporterId}
                 agentName={bug.createdByAgent?.name}
-                showAuthor
               />
             </div>
             <div className="flex min-w-0 items-center gap-3">
@@ -1283,10 +1249,11 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
                     organizationRole={bug.assigneeId ? organizationRoles[bug.assigneeId] : null}
                     image={bug.assignee.image}
                     avatar="sm"
+                    className="text-xs"
                     userId={bug.assigneeId}
                   />
                 ) : (
-                  <span className="text-sm text-zk-muted">Unassigned</span>
+                  <span className="text-xs text-zk-muted">Unassigned</span>
                 )}
                 {canSelfAssign ? (
                   <SelfAssignButton
@@ -1300,23 +1267,17 @@ export default async function BugDetailPage({ params, searchParams }: BugPagePro
             </div>
           </section>
 
-          {/* GitHub PR, under People. It lists the linked PR too, so the separate PR box is gone. */}
-          <EditableProofLinks
-            bugId={bug.id}
-            initialLinks={proofLinks}
+          {/* Links, under People: the GitHub PR (the linked one too) and the idea it came from. */}
+          <IssueLinks
+            links={proofLinks}
             linkedPullRequestUrl={bug.pullRequestUrl}
-            canEdit={(canEdit || isAssignee) && !bug.isDeleted}
+            idea={sourceIdea ? { number: sourceIdea.number } : null}
           />
 
           <SubmissionEvidence
             screenshots={submissionScreenshots}
             testResults={submissionTestResults}
             pullRequestUrl={bug.pullRequestUrl}
-          />
-
-          <IssueBids
-            bids={bidList}
-            canAward={canAwardBid && intakeStage === "ready"}
           />
 
           <ActivityTimeline

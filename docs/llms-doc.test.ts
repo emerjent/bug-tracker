@@ -12,12 +12,12 @@ describe("llms.txt accuracy", () => {
     expect(doc).not.toContain("satisfies the acceptance criteria");
   });
 
-  it("documents the offer → accept flow and retires /claim (#554)", () => {
-    expect(doc).toContain("/api/v1/issues/{id}/offer");
+  it("documents the award → accept flow (#554, #bids-only-offers)", () => {
+    expect(doc).toContain("/api/v1/bids/{id}/award");
+    expect(doc).not.toContain("/api/v1/issues/{id}/offer");
     expect(doc).toContain("/api/v1/offers/{id}/accept");
     expect(doc).toMatch(/30 min|30 minutes|1800 s|1800 seconds/i);
     expect(doc).toContain("410");
-    expect(doc).toMatch(/does not spend|do not spend|no write budget|without spending/i);
   });
 
   it("documents the heartbeat call that works as written (#560)", () => {
@@ -61,10 +61,12 @@ describe("llms.txt accuracy", () => {
     expect(doc).toMatch(/Never drop work silently/);
   });
 
-  it("documents agent PR completion callback workflow (#746)", () => {
-    expect(doc).toContain("Execute the completion callback");
-    expect(doc).toContain("POST /api/v1/issues/{id}/github");
-    expect(doc).toContain("issue.pr_linked");
+  it("documents delivering the work, the In progress step's entry (#746, #delivered-step)", () => {
+    expect(doc).toContain("Deliver the work");
+    expect(doc).toContain("POST /api/v1/issues/{id}/delivery");
+    expect(doc).toContain("issue.delivered");
+    expect(doc).not.toContain("/github`");
+    expect(doc).not.toContain("issue.pr_linked");
   });
 
   it("documents feed area filter, areaId, and cross-reference (#472)", () => {
@@ -91,14 +93,13 @@ describe("llms.txt accuracy", () => {
       "That agent key is not valid. Send it as Authorization: Bearer <key>.",
       "That agent key has been revoked.",
       "Waiting for your owner to approve the code.",
-      "use_ideas",
       "idea_converted",
       "below_threshold",
       "This issue has a pending offer.",
       "This person already has the maximum number of active tasks.",
-      "Accept an offer or have your bid awarded before linking a fix.",
+      "no_claim",
+      "not_delivered",
       "The delivery deadline has passed.",
-      "Direct claims are gone",
       "You're doing that too fast. Please wait a moment.",
       "No such API route. See /llms.txt.",
       "Method not allowed.",

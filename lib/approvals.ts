@@ -5,8 +5,6 @@ import { IssueApiError } from "@/lib/agent-api/errors";
 import { publish } from "@/lib/agent-api/events";
 import { isTenantAdminRole } from "@/lib/agents/membership";
 import { notifyLater } from "@/lib/notify";
-import { offerNext, scheduleOfferExpiry } from "@/lib/agent-api/offer";
-import { notifyClaimOffered } from "@/lib/agent-notifications";
 import { mergeAcceptedFix } from "@/lib/github/merge-pr";
 import type { AgentContext } from "@/lib/agents/require-agent";
 
@@ -19,7 +17,6 @@ export const approvalRuleSchema = z
   .object({
     stage: z.enum(["before_offer", "before_merge"]),
     issueTypeId: z.string().trim().min(1).optional().nullable(),
-    severity: z.enum(["low", "medium", "high", "critical"]).optional().nullable(),
     fileGlob: z.string().trim().min(1).max(500).optional().nullable(),
   })
   .strict();
@@ -67,7 +64,6 @@ export type ApprovalRuleLike = {
   id?: string;
   stage: string;
   issueTypeId?: string | null;
-  severity?: string | null;
   fileGlob?: string | null;
 };
 
@@ -75,7 +71,6 @@ export type MatchContext = {
   stage: ApprovalStage;
   issueTypeId?: string | null;
   issueTypeName?: string | null;
-  severity?: string | null;
   files?: string[];
 };
 
@@ -91,13 +86,6 @@ export function ruleMatches(rule: ApprovalRuleLike, context: MatchContext): bool
     const matchId = context.issueTypeId && context.issueTypeId.toLowerCase() === target;
     const matchName = context.issueTypeName && context.issueTypeName.toLowerCase() === target;
     if (!matchId && !matchName) return false;
-  }
-
-  // Match on severity if rule specifies one
-  if (rule.severity) {
-    if (!context.severity || rule.severity.toLowerCase() !== context.severity.toLowerCase()) {
-      return false;
-    }
   }
 
   // Match on file glob if rule specifies one
@@ -132,7 +120,6 @@ export async function assertApprovalOpen(
       tenantId: string;
       projectId: string;
       typeId: string | null;
-      severity: string | null;
       type?: { id: string; name: string } | null;
     } | null;
   } = {},
@@ -153,7 +140,6 @@ export async function assertApprovalOpen(
             tenantId: true,
             projectId: true,
             typeId: true,
-            severity: true,
             type: { select: { id: true, name: true } },
           },
         })
@@ -166,7 +152,6 @@ export async function assertApprovalOpen(
               tenantId: true,
               projectId: true,
               typeId: true,
-              severity: true,
               type: { select: { id: true, name: true } },
             },
           })
@@ -183,7 +168,6 @@ export async function assertApprovalOpen(
     stage,
     issueTypeId: bug.typeId,
     issueTypeName: bug.type?.name ?? null,
-    severity: bug.severity,
     files: options.files,
   };
 
@@ -389,21 +373,10 @@ export async function decideApproval(
         // Safe in partial DB mocks
       }
 
-      // Continue pipeline automatically with no agent action (#598)
-      if (approval.stage === "before_offer") {
-        if (approval.bug.status === "open") {
-          const offer = await offerNext(tx, { tenantId }, approval.bug);
-          if (offer) {
-            notifyClaimOffered({
-              id: offer.claim.id,
-              bugId: approval.bugId,
-              bugTitle: approval.bug.title,
-              beneficiaryUserId: offer.beneficiaryUserId,
-            });
-            scheduleOfferExpiry(offer.claim.id);
-          }
-        }
-      } else if (approval.stage === "before_merge") {
+      // Continue the pipeline with no agent action (#598). A granted
+      // before_offer approval needs nothing here: the issue stays Open and a
+      // manager agent awards one of its bids.
+      if (approval.stage === "before_merge") {
         // Find the manager agent that accepted the fix, to resume the merge as it.
         const acceptedAudit = await tx.agentAuditEvent.findFirst({
           where: { bugId: approval.bugId, action: "issue.accepted" },
@@ -471,7 +444,6 @@ export async function createApprovalRule(
       projectId,
       stage: input.stage,
       issueTypeId: input.issueTypeId ?? null,
-      severity: input.severity ?? null,
       fileGlob: input.fileGlob ?? null,
     },
   });

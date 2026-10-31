@@ -101,6 +101,11 @@ vi.mock("@/lib/platforms", () => ({
   getActivePlatforms: vi.fn().mockResolvedValue([]),
 }));
 
+// The close-suggestions panel reads its own rows (#close-superseded); these tests count the issue queries only.
+vi.mock("@/lib/agent-api/close-suggestions", () => ({
+  closeSuggestionsFor: vi.fn().mockResolvedValue(null),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     membership: { findUnique: vi.fn().mockResolvedValue({ role: "member", userId: "user-123" }), findMany: vi.fn().mockResolvedValue([]) },
@@ -118,8 +123,8 @@ vi.mock("@/lib/prisma", () => ({
     bugRevision: { findFirst: vi.fn().mockResolvedValue(null) },
     milestone: { findMany: vi.fn().mockResolvedValue([]) },
     goal: { findMany: vi.fn().mockResolvedValue([]) },
-    issueValidation: { findMany: vi.fn().mockResolvedValue([]) },
-    issueClaim: { findMany: vi.fn().mockResolvedValue([]) },
+    issueConfirmation: { findMany: vi.fn().mockResolvedValue([]) },
+    issueClaim: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
     testVerdict: { findMany: vi.fn().mockResolvedValue([]) },
     agentAuditEvent: { findMany: vi.fn().mockResolvedValue([]) },
   },
@@ -143,7 +148,7 @@ describe("BugDetailPage conditional user query (#349)", () => {
     expect(pageSource).toMatch(/canTriage[\s\S]*?prisma\.user\.findMany/);
   });
 
-  it("does not render CopyLinkButton, BoostTicketButton, or DeleteIssueButton in the header (#760)", () => {
+  it("does not render CopyLinkButton or BoostTicketButton in the header, and keeps Delete inside the actions menu (#760)", () => {
     const pageSourceFresh = readFileSync(
       path.resolve(__dirname, "page.tsx"),
       "utf8",
@@ -153,16 +158,17 @@ describe("BugDetailPage conditional user query (#349)", () => {
       /<div className="flex shrink-0 flex-wrap items-center gap-2 self-start print:hidden">([\s\S]*?)<\/div>/,
     );
     expect(headerActionBlockMatch).toBeTruthy();
-    const headerActionBlock = headerActionBlockMatch![1];
+    // Delete is in the header only behind the actions menu, never as its own button.
+    const headerActionBlock = headerActionBlockMatch![1].replace(/<IssueActionsMenu>[\s\S]*?<\/IssueActionsMenu>/, "");
 
     expect(headerActionBlock).not.toContain("CopyLinkButton");
     expect(headerActionBlock).not.toContain("BoostTicketButton");
     expect(headerActionBlock).not.toContain("DeleteIssueButton");
     expect(headerActionBlock).not.toContain("RestoreIssueButton");
 
-    // Danger zone still retains DeleteIssueButton
-    expect(pageSourceFresh).toContain("Danger zone");
-    expect(pageSourceFresh).toMatch(/Danger zone[\s\S]*?<DeleteIssueButton/);
+    // Delete sits in the actions menu at the top right; there is no Danger zone.
+    expect(pageSourceFresh).not.toContain("Danger zone");
+    expect(pageSourceFresh).toMatch(/<IssueActionsMenu>[\s\S]*?<DeleteIssueButton/);
   });
 
   it("does not render a Watch button or read the viewer's watch row (#417)", () => {
@@ -180,7 +186,8 @@ describe("BugDetailPage conditional user query (#349)", () => {
     expect(pageSourceFresh).toMatch(
       /prisma\.membership\.findMany\(\{\s*where: \{ tenantId: bug\.tenantId, userId: \{ in: namedUserIds \} \}/,
     );
-    expect(pageSourceFresh).toContain("organizationRole={organizationRoles[bug.reporterId]}");
+    // The reporter shows no role or Creator badges in People; the assignee keeps its organization role.
+    expect(pageSourceFresh).not.toContain("organizationRole={organizationRoles[bug.reporterId]}");
     expect(pageSourceFresh).toContain("organizationRole={bug.assigneeId ? organizationRoles[bug.assigneeId] : null}");
     expect(pageSourceFresh).toContain("organizationRoles={organizationRoles}");
   });
@@ -192,13 +199,25 @@ describe("BugDetailPage conditional user query (#349)", () => {
     );
     expect(pageSourceFresh).toContain('id="conversation"');
     expect(pageSourceFresh).toContain('id="comments"');
-    // #1446: the count follows the progress report's stage, falling back to the total.
-    expect(pageSourceFresh).toMatch(
-      /Conversation\s*<span[^>]*>\s*<StageConversationCount counts=\{stageCommentCounts\} fallback=\{comments\.visibleCount\} \/>/,
-    );
-    // New comments go through the Add comment modal, not a form under the thread.
-    expect(pageSourceFresh).toContain("<AddCommentDialog");
-    expect(pageSourceFresh).toContain("inlineComposer={false}");
+    // Who has it, then (while confirming) the confirmations, the Conversation
+    // with the bids, (past confirmation) the confirmations, then the comments
+    // in a card of their own (a comment box only while Open); disputes on their own button.
+    expect(pageSourceFresh).not.toContain("AddCommentDialog");
+    expect(pageSourceFresh).toContain("<AwardBox hold={hold} />");
+    expect(pageSourceFresh).toContain("<IssueComments");
+    expect(pageSourceFresh).toContain("composer={takesComments ? <CommentComposer bugId={bug.id} /> : null}");
+    expect(pageSourceFresh).toContain("<DisputeAwardDialog bugNumber={bug.number} roles={disputeRoles} />");
+    const order = [
+      "<AwardBox",
+      "{confirming ? confirmationsCard : null}",
+      'id="conversation"',
+      "<IssueBidsPanel",
+      "{!confirming ? confirmationsCard : null}",
+      'id="comments"',
+      "<IssueComments",
+    ].map((s) => pageSourceFresh.indexOf(s));
+    expect(order.every((at) => at > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
   describe("runtime execution", () => {
@@ -212,7 +231,6 @@ describe("BugDetailPage conditional user query (#349)", () => {
         title: "Test Bug",
         description: "Test Description",
         status: "open",
-        severity: "medium",
         voteCount: 0,
         proofLinks: [],
         reporterId: "reporter-1",
@@ -344,7 +362,6 @@ describe("BugDetailPage conditional user query (#349)", () => {
           number: 1,
           title: "Test bug",
           status: "open",
-          severity: "low",
           description: "description",
           createdAt: new Date(),
           updatedAt: new Date(),

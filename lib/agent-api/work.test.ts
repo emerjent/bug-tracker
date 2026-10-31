@@ -24,7 +24,7 @@ const facts = (overrides: Partial<ProjectWork["facts"] extends Map<string, infer
   createdByAgent: { ownerUserId: "owner-ada" },
   pullRequestUrl: null,
   claims: [],
-  validatorOwners: [],
+  confirmerOwners: [],
   testerOwners: [],
   ...overrides,
 });
@@ -46,10 +46,16 @@ function work(overrides: Partial<ProjectWork> = {}): ProjectWork {
     project: { id: "p1", slug: "ziki", name: "Ziki" },
     ideas: [],
     toConvert: [],
+    toReject: [],
+    toReclaim: [],
+    toSenseCheck: [],
+    toClose: [],
     toConfirm: [],
     ideaThreshold: 3,
     tests: [],
     ready: [],
+    bids: [],
+    toAward: [],
     toAccept: [],
     toMerge: [],
     jobs: [],
@@ -61,6 +67,20 @@ function work(overrides: Partial<ProjectWork> = {}): ProjectWork {
 }
 
 const nothingMine: AgentWork = { offers: [], reviewOffers: [], jobReviewOffers: [], claims: [], unread: 0 };
+
+/** One open bid on issue #1 (#bid-votes). */
+const openBid = (overrides: Partial<ProjectWork["bids"][number]> = {}): ProjectWork["bids"][number] => ({
+  id: "bid-ada",
+  issue: { id: "b1", number: 1, title: "x" },
+  agentName: "Ada's Claude",
+  ownerIds: ["owner-ada"],
+  by: "Ada",
+  summary: "I will fix the redirect.",
+  votes: 0,
+  voters: [],
+  createdAt: new Date("2026-10-29T10:00:00Z"),
+  ...overrides,
+});
 
 describe("itemsFor", () => {
   it("asks for a verdict on an idea, worth 1 point, until the owner gives one", () => {
@@ -78,6 +98,14 @@ describe("itemsFor", () => {
     expect(itemsFor(agent("working"), work({ ideas: [idea], ideaFacts: new Map([["b1", given]]) }), nothingMine)).toEqual([]);
   });
 
+  it("stops asking for verdicts once an idea reaches the threshold (#727)", () => {
+    const at = { id: "b1", number: 7, title: "x", score: 3 };
+    const short = { id: "b2", number: 8, title: "y", score: 2 };
+    const facts = new Map([["b1", ideaFacts()], ["b2", ideaFacts()]]);
+    const items = itemsFor(agent("working"), work({ ideas: [at, short], ideaFacts: facts }), nothingMine);
+    expect(items.map((i) => i.key)).toEqual(["idea:b2"]);
+  });
+
   it("tells a manager agent it may give up to 5 votes", () => {
     const items = itemsFor(agent("manager"), work({ ideas: [{ id: "b1", number: 7, title: "x", score: 0 }], ideaFacts: new Map([["b1", ideaFacts()]]) }), nothingMine);
     expect(items[0].actions[0].cli).toContain("--votes 1-5");
@@ -89,18 +117,16 @@ describe("itemsFor", () => {
     expect(items).toEqual([]);
   });
 
-  it("asks to confirm a converted issue, and drops it once the owner did both checks", () => {
-    const issue = { id: "b1", number: 7, title: "x", needs: ["validation", "duplicate_check"] as ("validation" | "duplicate_check")[] };
+  it("asks to confirm a converted issue at the confirmations route, and drops it once the owner gave an entry", () => {
+    const issue = { id: "b1", number: 7, title: "x", confirmations: 1, needed: 2 };
     const items = itemsFor(agent("working"), work({ toConfirm: [issue], facts: new Map([["b1", facts()]]) }), nothingMine);
     expect(items[0]).toMatchObject({ kind: "confirm_issue", canAct: true });
-    expect(items[0].actions.map((a) => a.name)).toEqual(["validate_issue", "check_duplicate"]);
+    expect(items[0].detail).toContain("1 of 2 confirmations");
+    expect(items[0].actions.map((a) => a.name)).toEqual(["confirm_issue"]);
+    expect(items[0].actions[0].path).toContain("/api/v1/issues/b1/confirmations");
+    expect(items[0].actions[0].cli).toContain("confirm-issue --id b1 --verdict confirm|reject|neutral --summary");
 
-    const done = facts({
-      validatorOwners: [
-        { kind: "real", ownerUserId: "owner-bob", onBehalfOfUserId: "owner-bob" },
-        { kind: "duplicate", ownerUserId: "owner-bob", onBehalfOfUserId: "owner-bob" },
-      ],
-    });
+    const done = facts({ confirmerOwners: ["owner-bob"] });
     expect(itemsFor(agent("working"), work({ toConfirm: [issue], facts: new Map([["b1", done]]) }), nothingMine)).toEqual([]);
   });
 
@@ -119,6 +145,36 @@ describe("itemsFor", () => {
     expect(forManager!.actions.map((a) => a.name)).toEqual(["list_idea_verdicts", "convert_idea"]);
   });
 
+  it("lists a bad idea as a manager task to reject (#idea-rejected)", () => {
+    const project = work({ toReject: [{ id: "i1", number: 4, title: "x", totalVotes: 3, goodVotes: 1 }] });
+    const forWorking = itemsFor(agent("working"), project, nothingMine).find((item) => item.kind === "reject_idea");
+    expect(forWorking).toMatchObject({ key: "reject_idea:i1", minimumRole: "manager", canAct: false });
+    const forManager = itemsFor(agent("manager"), project, nothingMine).find((item) => item.kind === "reject_idea");
+    expect(forManager).toMatchObject({ canAct: true });
+    expect(forManager!.actions.map((a) => a.name)).toEqual(["list_idea_verdicts", "reject_idea"]);
+  });
+
+  it("asks other agents for a sense check on stale in-progress work, not its holder or a past voter (#abandon)", () => {
+    const since = new Date("2026-10-30T06:00:00Z");
+    const check = { id: "b5", number: 5, title: "x", votes: 1, threshold: 3, holderOwners: ["owner-ada"], voters: ["owner-cara"], since };
+    const items = itemsFor(agent("working"), work({ toSenseCheck: [check] }), nothingMine).filter((item) => item.kind === "sense_check");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ key: "sense_check:b5", minimumRole: "working", canAct: true });
+    expect(items[0].detail).toContain("1 of 3 Abandoned votes");
+    expect(items[0].actions[0]).toMatchObject({ name: "vote_abandoned", method: "POST", path: expect.stringContaining("/api/v1/issues/b5/abandon-votes") });
+
+    for (const ownerId of ["owner-ada", "owner-cara"]) {
+      expect(itemsFor(agent("working", ownerId), work({ toSenseCheck: [check] }), nothingMine).some((item) => item.kind === "sense_check")).toBe(false);
+    }
+  });
+
+  it("lists a stale hold for any agent to reclaim (#reclaim)", () => {
+    const items = itemsFor(agent("working"), work({ toReclaim: [{ id: "b6", number: 6, title: "x", reason: "offer_expired" }] }), nothingMine);
+    const item = items.find((i) => i.kind === "reclaim_issue");
+    expect(item).toMatchObject({ key: "reclaim_issue:b6:offer_expired", minimumRole: "working", canAct: true });
+    expect(item!.actions[0]).toMatchObject({ name: "reclaim_issue", method: "POST", path: expect.stringContaining("/api/v1/issues/b6/reclaim") });
+  });
+
   it("leaves out fixes the owner already tested at this pull request", () => {
     const pr = "https://github.com/emerjent/ziki/pull/1";
     const tested = facts({ pullRequestUrl: pr, testerOwners: [{ ownerUserId: "owner-bob", pullRequestUrl: pr }] });
@@ -128,22 +184,87 @@ describe("itemsFor", () => {
 
   it("lists manager and merger work for a working agent without letting it act", () => {
     const project = work({
-      ready: [{ id: "b1", number: 1, title: "x", voteCount: 3, severity: "high" }],
+      ready: [{ id: "b1", number: 1, title: "x", importance: 3 }],
+      toAward: [{ id: "b4", number: 4, title: "w", bids: [openBid({ issue: { id: "b4", number: 4, title: "w" } })] }],
+      toClose: [{ id: "b5", number: 5, title: "v", votes: 3, threshold: 3, suggestions: 1, summaries: ["#2 covers it."] }],
       toAccept: [{ id: "b2", number: 2, title: "y" }],
-      toMerge: [{ id: "b3", number: 3, title: "z", reviewStatus: "ready_to_merge" }],
+      toMerge: [{ id: "b3", number: 3, title: "z" }],
       facts: new Map([["b2", facts()], ["b3", facts()]]),
     });
     const items = itemsFor(agent("working"), project, nothingMine);
     const byKind = Object.fromEntries(items.map((item) => [item.kind, item]));
     expect(byKind.ready_issue).toMatchObject({ canAct: true, minimumRole: "working" });
-    expect(byKind.dispatch).toMatchObject({ canAct: false, minimumRole: "manager", blockedReason: "Needs a manager agent." });
+    expect(byKind).not.toHaveProperty("dispatch");
+    expect(byKind.award_bid).toMatchObject({ canAct: false, minimumRole: "manager", blockedReason: "Needs a manager agent." });
+    expect(byKind.close_issue).toMatchObject({ canAct: false, minimumRole: "manager", blockedReason: "Needs a manager agent." });
     expect(byKind.accept_fix).toMatchObject({ canAct: false, minimumRole: "manager" });
     expect(byKind.merge_fix).toMatchObject({ canAct: false, minimumRole: "merger", blockedReason: "Needs a merger agent." });
 
     const merger = Object.fromEntries(itemsFor(agent("merger"), project, nothingMine).map((item) => [item.kind, item]));
-    expect(merger.dispatch.canAct).toBe(true);
+    expect(merger.award_bid.canAct).toBe(true);
+    expect(merger.close_issue.canAct).toBe(true);
     expect(merger.accept_fix.canAct).toBe(true);
     expect(merger.merge_fix.canAct).toBe(true);
+  });
+
+  it("asks to bid on a ready issue, with no offer request", () => {
+    const [item] = itemsFor(agent("working"), work({ ready: [{ id: "b1", number: 1, title: "x", importance: 3 }] }), nothingMine);
+    expect(item).toMatchObject({ kind: "ready_issue", title: "Bid on #1", canAct: true });
+    expect(item.actions.map((a) => a.name)).toEqual(["bid"]);
+    expect(item.actions[0]).toMatchObject({ method: "POST", path: "/api/v1/issues/b1/bid?projectId=p1" });
+  });
+
+  it("asks other agents to vote for an open bid, not its own owner or a past voter (#bid-votes)", () => {
+    const bid = openBid({ votes: 1, voters: ["owner-cara"] });
+    const items = itemsFor(agent("working"), work({ bids: [bid] }), nothingMine).filter((item) => item.kind === "review_bid");
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ key: "review_bid:bid-ada", minimumRole: "working", canAct: true, issue: { id: "b1", number: 1 } });
+    expect(items[0].detail).toContain("1 vote so far");
+    expect(items[0].actions).toEqual([
+      { name: "vote_bid", minimumRole: "working", method: "POST", path: "/api/v1/bids/bid-ada/votes?projectId=p1", cli: "vote-bid --id bid-ada" },
+    ]);
+
+    for (const ownerId of ["owner-ada", "owner-cara"]) {
+      expect(itemsFor(agent("working", ownerId), work({ bids: [bid] }), nothingMine).some((item) => item.kind === "review_bid")).toBe(false);
+    }
+  });
+
+  it("asks a manager to award one of an open issue's bids, most voted first, never its own owner's (#bids-only-offers)", () => {
+    const issue = { id: "b1", number: 1, title: "x" };
+    const bids = [
+      openBid({ id: "bid-ada", votes: 1 }),
+      openBid({ id: "bid-dana", agentName: "Dana's Claude", ownerIds: ["owner-dana"], by: "Dana", votes: 5 }),
+      openBid({ id: "bid-cara", agentName: "Cara's Claude", ownerIds: ["owner-cara"], by: "Cara", votes: 3 }),
+    ];
+    const project = work({ toAward: [{ ...issue, bids }] });
+
+    const item = itemsFor(agent("manager", "owner-dana"), project, nothingMine).find((i) => i.kind === "award_bid");
+    expect(item).toMatchObject({ key: "award_bid:b1", minimumRole: "manager", canAct: true, title: "Award one of the 3 bids on #1" });
+    expect(item!.actions.map((a) => a.cli)).toEqual(["award-bid --id bid-cara", "award-bid --id bid-ada"]);
+    expect(item!.actions[0]).toMatchObject({ name: "award_bid", method: "POST", path: "/api/v1/bids/bid-cara/award?projectId=p1" });
+    expect(item!.detail).toContain("Dana's Claude for Dana (5 votes)");
+
+    const onlyOwn = work({ toAward: [{ ...issue, bids: [bids[1]] }] });
+    expect(itemsFor(agent("manager", "owner-dana"), onlyOwn, nothingMine).find((i) => i.kind === "award_bid")).toMatchObject({
+      canAct: false,
+      blockedReason: "Every bid on it is from your owner.",
+      actions: [],
+    });
+
+    const forWorking = itemsFor(agent("working", "owner-eli"), project, nothingMine).find((i) => i.kind === "award_bid");
+    expect(forWorking).toMatchObject({ canAct: false, blockedReason: "Needs a manager agent." });
+  });
+
+  it("asks a manager to close an issue whose suggestions reached the threshold (#close-superseded)", () => {
+    const project = work({ toClose: [{ id: "b5", number: 5, title: "v", votes: 5, threshold: 3, suggestions: 3, summaries: ["#2 covers it.", "Same as #2."] }] });
+    const item = itemsFor(agent("manager"), project, nothingMine).find((i) => i.kind === "close_issue");
+    expect(item).toMatchObject({ key: "close_issue:b5", minimumRole: "manager", canAct: true, title: "Close #5 as superseded?" });
+    expect(item!.detail).toContain("3 suggestions say another issue or change covers it (5 of 3 votes)");
+    expect(item!.detail).toContain('"#2 covers it." "Same as #2."');
+    expect(item!.actions).toEqual([
+      { name: "close_issue", minimumRole: "manager", method: "POST", path: "/api/v1/issues/b5/close?projectId=p1", cli: "close-issue --id b5 --reason superseded --summary <why you close it>" },
+    ]);
+    expect(itemsFor(agent("working"), project, nothingMine).find((i) => i.kind === "close_issue")).toMatchObject({ canAct: false });
   });
 
   it("blocks a manager from accepting a fix it is not independent of", () => {
@@ -159,7 +280,7 @@ describe("itemsFor", () => {
       ...nothingMine,
       offers: [{ id: "o1", offeredAt, bug: { id: "b9", number: 9, title: "Offered" } }],
     };
-    const items = itemsFor(agent("working"), work({ ready: [{ id: "b1", number: 1, title: "x", voteCount: 3, severity: "high" }] }), mine);
+    const items = itemsFor(agent("working"), work({ ready: [{ id: "b1", number: 1, title: "x", importance: 3 }] }), mine);
     expect(items[0]).toMatchObject({ kind: "offer", key: "offer:o1", dueAt: "2026-10-29T10:30:00.000Z" });
     expect(items[0].actions[0]).toMatchObject({ name: "accept_offer", path: "/api/v1/offers/o1/accept", cli: "accept-offer --id o1" });
   });
@@ -169,7 +290,7 @@ describe("waitingForOthers", () => {
   const project = work({
     toConvert: [{ id: "b1", number: 7, title: "x", score: 4 }, { id: "b4", number: 9, title: "w", score: 3 }],
     toAccept: [{ id: "b2", number: 2, title: "y" }],
-    toMerge: [{ id: "b3", number: 3, title: "z", reviewStatus: "ready_to_merge" }],
+    toMerge: [{ id: "b3", number: 3, title: "z" }],
     facts: new Map([["b1", facts()], ["b2", facts()], ["b3", facts()], ["b4", facts()]]),
   });
 

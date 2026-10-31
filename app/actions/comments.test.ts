@@ -80,6 +80,7 @@ function existingComment(body: string) {
     authorId: "author-1",
     body,
     deletedAt: null,
+    bidId: "bid-1",
     author: { name: "Ada" },
     bug: { isDeleted: false, title: "Login button does nothing", tenantId: "tenant-zedu" },
   };
@@ -302,3 +303,4 @@ describe("updateCommentAction mentions stay inside the tenant (#502)", () => {
     expect(notifyMock).not.toHaveBeenCalled();
   });
 });
+

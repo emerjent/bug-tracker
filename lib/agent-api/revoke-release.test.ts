@@ -2,10 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const publish = vi.hoisted(() => vi.fn(async () => ({ id: "event" })));
 const isConfirmed = vi.hoisted(() => vi.fn());
-const offerNext = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/agent-api/events", () => ({ publish }));
-vi.mock("@/lib/agent-api/validation", () => ({ isConfirmed }));
-vi.mock("@/lib/agent-api/offer", () => ({ offerNext }));
+vi.mock("@/lib/agent-api/confirmations", () => ({ isConfirmed }));
 
 import { releaseWorkOfRevokedAgent } from "./revoke-release";
 
@@ -25,7 +23,6 @@ function txWith(claims: { id: string; bugId: string; status: "offered" | "active
       findFirst: vi.fn(async () => ({ id: "bug-1", projectId: "project-1", title: "Example", status: "open", assigneeId: null })),
     },
     issueBid: { updateMany: vi.fn(async () => ({ count: 2 })) },
-    issueInterest: { updateMany: vi.fn(async () => ({ count: 1 })) },
     agentAuditEvent: { create: vi.fn(async () => ({})) },
   };
 }
@@ -36,7 +33,6 @@ describe("revoking an agent hands its work back (#523)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     isConfirmed.mockResolvedValue(false);
-    offerNext.mockResolvedValue(null);
   });
 
   it("releases an active claim and reopens the issue", async () => {
@@ -44,7 +40,7 @@ describe("revoking an agent hands its work back (#523)", () => {
 
     const result = await releaseWorkOfRevokedAgent(tx as never, input);
 
-    expect(result).toEqual({ releasedClaims: 1, withdrawnBids: 2, withdrawnInterests: 1, offers: [] });
+    expect(result).toEqual({ releasedClaims: 1, withdrawnBids: 2 });
     expect(tx.issueClaim.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { agentId: "agent-dead", releasedAt: null, status: { in: ["offered", "active"] } } }),
     );
@@ -52,9 +48,9 @@ describe("revoking an agent hands its work back (#523)", () => {
       where: { id: "claim-1" },
       data: { status: "released", releasedAt: now, releaseReason: "revoked" },
     });
-    // Only reopened while it is still this person's in-progress issue.
+    // Only reopened while it is still this person's in-progress issue, and no fix is linked yet.
     expect(tx.bug.updateMany).toHaveBeenCalledWith({
-      where: { id: "bug-1", tenantId: "tenant-zedu", isDeleted: false, assigneeId: "ada", status: "in_progress" },
+      where: { id: "bug-1", tenantId: "tenant-zedu", isDeleted: false, assigneeId: "ada", status: "in_progress", pullRequestUrl: null },
       data: { assigneeId: null, status: "open" },
     });
     expect(publish).toHaveBeenCalledWith(tx, expect.objectContaining({
@@ -72,29 +68,6 @@ describe("revoking an agent hands its work back (#523)", () => {
     await releaseWorkOfRevokedAgent(tx as never, input);
     expect(tx.issueClaim.update).toHaveBeenCalled();
     expect(tx.bug.updateMany).not.toHaveBeenCalled();
-  });
-
-  it("re-offers an open confirmed issue after revoking its active claim", async () => {
-    isConfirmed.mockResolvedValue(true);
-    offerNext.mockResolvedValue({
-      claim: { id: "claim-next" },
-      bugTitle: "Example",
-      beneficiaryUserId: "bob",
-    });
-    const tx = txWith([{ id: "claim-1", bugId: "bug-1", status: "active", beneficiaryUserId: "ada" }]);
-
-    const result = await releaseWorkOfRevokedAgent(tx as never, input);
-
-    expect(result.offers).toEqual([{
-      id: "claim-next",
-      bugId: "bug-1",
-      bugTitle: "Example",
-      beneficiaryUserId: "bob",
-    }]);
-    expect(offerNext).toHaveBeenCalledWith(tx, { tenantId: input.tenantId }, expect.objectContaining({
-      id: "bug-1",
-      status: "open",
-    }), ["ada"]);
   });
 
   it("leaves the issue alone when someone else also holds it", async () => {
@@ -121,13 +94,13 @@ describe("revoking an agent hands its work back (#523)", () => {
     });
   });
 
-  it("withdraws active volunteer interest when agent is revoked (#510)", async () => {
+  it("withdraws its open bids, the one way to volunteer (#510, #issue-bids)", async () => {
     const tx = txWith([]);
     const result = await releaseWorkOfRevokedAgent(tx as never, input);
-    expect(tx.issueInterest.updateMany).toHaveBeenCalledWith({
-      where: { agentId: "agent-dead", withdrawnAt: null },
+    expect(tx.issueBid.updateMany).toHaveBeenCalledWith({
+      where: { agentId: "agent-dead", withdrawnAt: null, awardedAt: null },
       data: { withdrawnAt: now },
     });
-    expect(result.withdrawnInterests).toBe(1);
+    expect(result.withdrawnBids).toBe(2);
   });
 });

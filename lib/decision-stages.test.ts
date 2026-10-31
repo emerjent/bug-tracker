@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { statuses } from "@/lib/validations/issue";
 import {
+  DECISION_STAGES,
   claimDecisionKind,
   currentDecisionStage,
   payloadMerged,
+  pipelineStages,
+  stageSetback,
   decisionTone,
   stageAt,
-  stageOfComment,
   stageOfDecision,
   stageStarts,
   tallyStages,
@@ -16,12 +19,13 @@ describe("stageOfDecision and decisionTone (#1446)", () => {
   const cases: [DecisionLike, string, string][] = [
     [{ kind: "confirmed" }, "confirm", "positive"],
     [{ kind: "rejected" }, "confirm", "negative"],
-    [{ kind: "claimed" }, "open", "positive"],
-    [{ kind: "claim_released" }, "open", "negative"],
-    [{ kind: "verdict", goodToMerge: true }, "done", "positive"],
-    [{ kind: "verdict", goodToMerge: false }, "done", "negative"],
-    [{ kind: "accepted" }, "ready", "positive"],
-    [{ kind: "merge_rejected" }, "ready", "negative"],
+    [{ kind: "claimed" }, "progress", "positive"],
+    [{ kind: "claim_released" }, "progress", "negative"],
+    [{ kind: "delivered" }, "progress", "positive"],
+    [{ kind: "verdict", goodToMerge: true }, "delivered", "positive"],
+    [{ kind: "verdict", goodToMerge: false }, "delivered", "negative"],
+    [{ kind: "accepted" }, "done", "positive"],
+    [{ kind: "merge_rejected" }, "done", "negative"],
     [{ kind: "deploy_failed" }, "ready", "negative"],
     [{ kind: "accepted", merged: true }, "live", "positive"],
   ];
@@ -70,34 +74,41 @@ describe("tallyStages", () => {
     expect(tallies).toEqual({
       idea: { positive: 0, negative: 0 },
       confirm: { positive: 8, negative: 1 },
-      open: { positive: 1, negative: 1 },
-      done: { positive: 7, negative: 2 },
+      open: { positive: 0, negative: 0 },
+      progress: { positive: 1, negative: 1 },
+      delivered: { positive: 7, negative: 2 },
+      done: { positive: 0, negative: 0 },
       ready: { positive: 0, negative: 0 },
       live: { positive: 0, negative: 0 },
+      closed: { positive: 0, negative: 0 },
     });
   });
 });
 
 describe("currentDecisionStage", () => {
-  const base = { status: "open", reviewStatus: null, pullRequestUrl: null, hasClaim: false, ideaAccepted: false };
-
-  it("starts at Requires confirmation: every issue was converted from an idea (#idea-table, #714)", () => {
-    expect(currentDecisionStage(base)).toBe("confirm");
-    expect(currentDecisionStage({ ...base, ideaAccepted: true })).toBe("open");
+  it("is the issue's one status: every status has its own step", () => {
+    expect(currentDecisionStage({ status: "requires_confirmation" })).toBe("confirm");
+    expect(currentDecisionStage({ status: "open" })).toBe("open");
+    expect(currentDecisionStage({ status: "in_progress" })).toBe("progress");
+    expect(currentDecisionStage({ status: "delivered" })).toBe("delivered");
+    expect(currentDecisionStage({ status: "done" })).toBe("done");
+    expect(currentDecisionStage({ status: "ready_to_merge" })).toBe("ready");
+    expect(currentDecisionStage({ status: "resolved" })).toBe("live");
+    expect(currentDecisionStage({ status: "closed" })).toBe("closed");
   });
-  it("is Open once the issue is confirmed or claimed", () => {
-    expect(currentDecisionStage({ ...base, ideaAccepted: true })).toBe("open");
-    expect(currentDecisionStage({ ...base, hasClaim: true })).toBe("open");
-    expect(currentDecisionStage({ ...base, status: "in_progress" })).toBe("open");
+  it("puts every status on the pipeline, with Closed in Live's place", () => {
+    for (const status of statuses) expect(pipelineStages(currentDecisionStage({ status }))).toContain(currentDecisionStage({ status }));
+    expect(pipelineStages("closed")).toEqual(["idea", "confirm", "open", "progress", "delivered", "done", "ready", "closed"]);
+    // Before Done the pipeline ends at Done; from Done on it runs to Live.
+    expect(pipelineStages("open")).toEqual(["idea", "confirm", "open", "progress", "delivered", "done"]);
+    expect(pipelineStages("delivered")).toEqual(["idea", "confirm", "open", "progress", "delivered", "done"]);
+    expect(pipelineStages("done")).toEqual(DECISION_STAGES);
+    expect(pipelineStages("live")).toEqual(DECISION_STAGES);
   });
-  it("is Done once a pull request is in, including after a merger rejection", () => {
-    expect(currentDecisionStage({ ...base, pullRequestUrl: "https://github.com/o/r/pull/1" })).toBe("done");
-    expect(currentDecisionStage({ ...base, reviewStatus: "submitted" })).toBe("done");
-    expect(currentDecisionStage({ ...base, reviewStatus: "rejected" })).toBe("done");
-  });
-  it("is Ready to merge, then Live", () => {
-    expect(currentDecisionStage({ ...base, reviewStatus: "ready_to_merge" })).toBe("ready");
-    expect(currentDecisionStage({ ...base, status: "resolved", reviewStatus: "merged" })).toBe("live");
+  it("is a setback only when a manager sent the fix back to In progress", () => {
+    expect(stageSetback("progress", true)).toBe(true);
+    expect(stageSetback("progress", false)).toBe(false);
+    expect(stageSetback("done", true)).toBe(false);
   });
 });
 
@@ -113,44 +124,29 @@ describe("stageStarts and stageAt", () => {
   it("starts each stage at its earliest decision and leaves unreached ones null", () => {
     expect(starts).toEqual({
       confirm: Date.parse("2026-10-21T21:00:00.000Z"),
-      open: Date.parse("2026-10-22T16:00:00.000Z"),
-      done: Date.parse("2026-10-22T20:00:00.000Z"),
-      ready: Date.parse("2026-10-25T09:40:00.000Z"),
+      open: null,
+      progress: Date.parse("2026-10-22T16:00:00.000Z"),
+      delivered: Date.parse("2026-10-22T20:00:00.000Z"),
+      done: Date.parse("2026-10-25T09:40:00.000Z"),
+      ready: null,
       live: null,
+      closed: null,
     });
   });
   it("finds the stage the issue was in at a time", () => {
     expect(stageAt("2026-10-21T20:00:00.000Z", starts)).toBe("idea");
     expect(stageAt("2026-10-21T22:00:00.000Z", starts)).toBe("confirm");
-    expect(stageAt("2026-10-22T16:00:00.000Z", starts)).toBe("open");
-    expect(stageAt("2026-10-24T00:00:00.000Z", starts)).toBe("done");
-    expect(stageAt("2026-10-26T00:00:00.000Z", starts)).toBe("ready");
+    expect(stageAt("2026-10-22T16:00:00.000Z", starts)).toBe("progress");
+    expect(stageAt("2026-10-24T00:00:00.000Z", starts)).toBe("delivered");
+    expect(stageAt("2026-10-26T00:00:00.000Z", starts)).toBe("done");
   });
 });
 
-describe("stageOfComment", () => {
-  const starts = stageStarts([{ kind: "claimed", at: "2026-10-22T16:00:00.000Z" }]);
-  const none = stageStarts([]);
-
-  it("puts a plain comment in the stage it was posted in", () => {
-    expect(stageOfComment("comment", "2026-10-21T10:00:00.000Z", starts)).toBe("idea");
-    expect(stageOfComment(null, "2026-10-23T10:00:00.000Z", starts)).toBe("open");
-  });
-  it("maps bids, merge requests and deliveries", () => {
-    expect(stageOfComment("bid", "2026-10-21T10:00:00.000Z", none)).toBe("open");
-    expect(stageOfComment("request_to_merge", "2026-10-21T10:00:00.000Z", none)).toBe("ready");
-    expect(stageOfComment("delivery", "2026-10-21T10:00:00.000Z", none)).toBe("live");
-  });
-  it("puts reviews before the first claim under Idea and later ones under Done", () => {
-    expect(stageOfComment("review", "2026-10-21T10:00:00.000Z", starts)).toBe("idea");
-    expect(stageOfComment("review", "2026-10-23T10:00:00.000Z", starts)).toBe("done");
-    expect(stageOfComment("review", "2026-10-23T10:00:00.000Z", none)).toBe("idea");
-  });
+describe("stageStarts with a conversion time", () => {
   it("starts Requires confirmation when the idea is converted (#714)", () => {
     const converted = stageStarts([{ kind: "claimed", at: "2026-10-22T16:00:00.000Z" }], "2026-10-21T12:00:00.000Z");
     expect(converted.confirm).toBe(Date.parse("2026-10-21T12:00:00.000Z"));
-    expect(stageOfComment("comment", "2026-10-21T10:00:00.000Z", converted)).toBe("idea");
-    expect(stageOfComment("comment", "2026-10-21T13:00:00.000Z", converted)).toBe("confirm");
-    expect(stageOfComment("review", "2026-10-21T13:00:00.000Z", converted)).toBe("confirm");
+    expect(stageAt("2026-10-21T10:00:00.000Z", converted)).toBe("idea");
+    expect(stageAt("2026-10-21T13:00:00.000Z", converted)).toBe("confirm");
   });
 });
