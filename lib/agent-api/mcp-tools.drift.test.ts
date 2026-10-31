@@ -1,23 +1,26 @@
+import { mergeReviewBodySchema } from "@/lib/agent-api/merge";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { TOOLS } from "../../packages/mcp-server/src/tools";
 import { agentEscalationSchema, agentQuestionSchema } from "@/lib/agent-questions";
-import { commentSchema, createBugSchema } from "@/lib/validations/issue";
+import { commentSchema } from "@/lib/validations/issue";
 import { createGoalSchema, splitGoalPoolSchema, updateGoalStatusSchema } from "@/lib/validations/goal";
 import { createJobSchema, jobReviewSchema, submitJobSchema } from "@/lib/validations/job";
 import { redesignSchema } from "@/lib/redesigns";
 import { missionCoverageSchema, nextMissionSchema } from "@/lib/missions";
 import { bidSchema } from "./bid";
-import { claimSchema } from "./claim";
 import { extendSchema } from "./deadline";
-import { interestSchema } from "./interest";
 import { releaseSchema } from "./offer";
 import { structureInputSchema } from "./structure";
 import { testVerdictBodySchema } from "./test-verdict";
-import { validationBodySchema } from "./validation";
+import { deliveryBodySchema } from "./delivery";
+import { confirmationSchema } from "./confirmations";
 import { ideaVerdictFields } from "./idea-verdicts";
 import { recordMistakeSchema } from "./mistakes";
 import { assignSchema } from "./assign";
+import { createIdeaSchema } from "./ideas";
+import { abandonVoteSchema } from "./abandon";
+import { closeIssueSchema, closeSuggestionSchema } from "./close-suggestions";
 
 /**
  * The MCP server (packages/mcp-server) builds its tool inputs from its own zod
@@ -26,20 +29,20 @@ import { assignSchema } from "./assign";
  * from the API (#612).
  */
 const ROUTE_SCHEMAS: Record<string, z.ZodType> = {
+  ziki_deliver: deliveryBodySchema,
   ziki_assign_issue: assignSchema,
-  ziki_create_idea: createBugSchema,
+  ziki_create_idea: createIdeaSchema,
   ziki_comment: commentSchema,
-  ziki_volunteer: bidSchema,
+  ziki_bid: bidSchema,
   ziki_extend_deadline: extendSchema,
-  ziki_validate_issue: validationBodySchema,
+  ziki_confirm_issue: confirmationSchema,
   ziki_give_idea_verdict: ideaVerdictFields,
   ziki_submit_test_result: testVerdictBodySchema,
+  ziki_merge_fix: mergeReviewBodySchema,
   ziki_ask_owner: agentQuestionSchema,
   ziki_escalate: agentEscalationSchema,
-  ziki_claim_issue: claimSchema,
   ziki_release_claim: releaseSchema,
   ziki_structure_issue: structureInputSchema,
-  ziki_register_interest: interestSchema,
   ziki_create_goal: createGoalSchema,
   ziki_update_goal: updateGoalStatusSchema,
   ziki_split_goal: splitGoalPoolSchema,
@@ -50,16 +53,21 @@ const ROUTE_SCHEMAS: Record<string, z.ZodType> = {
   ziki_next_mission: nextMissionSchema,
   ziki_cover_mission: missionCoverageSchema.extend({ projectId: z.string().trim().min(1) }),
   ziki_record_project_mistake: recordMistakeSchema,
+  ziki_vote_abandoned: abandonVoteSchema,
+  ziki_suggest_close: closeSuggestionSchema,
+  ziki_close_issue: closeIssueSchema,
 };
 
-// The agent routes extend the shared issue and comment schemas with attachmentIds, and
-// idea creation with acknowledgeSimilar (lib/agent-api/ideas.ts `createIdeaSchema`).
+// The agent comment route extends the shared comment schema with attachmentIds; idea
+// creation's own schema (lib/agent-api/ideas.ts `createIdeaSchema`) already has both.
 const AGENT_LAYER_FIELDS = new Set(["attachmentIds", "acknowledgeSimilar"]);
 
 // Fields on the shared schema that the agent route deliberately does not take (it picks only some of
-// them, and severity is set by reviewers), so a tool must not offer them.
+// them), so a tool must not offer them.
 const NOT_OFFERED_TO_AGENTS: Record<string, readonly string[]> = {
-  ziki_create_idea: ["severity", "typeId", "assigneeId"],
+  ziki_create_idea: ["typeId"],
+  // `action` is the older name for `verdict`, kept for old clients only.
+  ziki_merge_fix: ["action"],
 };
 
 // Fields the route doesn't take from the body: the tool puts them in the path or query.
@@ -113,7 +121,6 @@ describe("MCP tools match the route body schemas", () => {
     expect(unchecked.sort()).toEqual([
       "ziki_collect_pairing_token",
       "ziki_create_webhook",
-      "ziki_link_pull_request",
       "ziki_mark_inbox_read",
       "ziki_pair",
       "ziki_update_webhook",

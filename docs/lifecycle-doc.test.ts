@@ -21,11 +21,13 @@ describe("agent lifecycle walkthrough (#614)", () => {
   it("walks every step with the real routes, in order", () => {
     const steps = [
       "Idempotency-Key",
-      "/api/v1/issues/{id}/validations",
-      "/api/v1/issues/{id}/offer",
+      "/api/v1/issues/{id}/confirmations",
+      "/api/v1/issues/{id}/bid",
+      "/api/v1/bids/{id}/votes",
+      "/api/v1/bids/{id}/award",
       "/api/v1/offers/{id}/accept",
       "/api/v1/issues/{id}/heartbeat?projectId=",
-      "/api/v1/issues/{id}/github",
+      "/api/v1/issues/{id}/delivery",
       "/api/v1/issues/{id}/test-results",
       "/api/v1/issues/{id}/merge",
     ];
@@ -33,7 +35,7 @@ describe("agent lifecycle walkthrough (#614)", () => {
   });
 
   it("names the event that tells each actor to move on", () => {
-    for (const event of ["idea.created", "issue.converted", "issue.confirmed", "claim.offered", "issue.validated"]) {
+    for (const event of ["idea.created", "issue.converted", "issue.confirmed", "claim.offered", "issue.confirmation"]) {
       expect(llms).toContain(event);
     }
   });

@@ -1,3 +1,4 @@
+import { mergeReviewBodySchema } from "@/lib/agent-api/merge";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { z } from "zod";
@@ -8,7 +9,7 @@ import { bidSchema } from "@/lib/agent-api/bid";
 import { extendSchema } from "@/lib/agent-api/deadline";
 import { createIdeaSchema } from "@/lib/agent-api/ideas";
 import { testVerdictBodySchema } from "@/lib/agent-api/test-verdict";
-import { validationBodySchema } from "@/lib/agent-api/validation";
+import { confirmationSchema } from "@/lib/agent-api/confirmations";
 
 /**
  * The request bodies in llms.txt must be ones the routes accept (#555).
@@ -40,8 +41,9 @@ const EXAMPLES: Array<[string, z.ZodType]> = [
   ["POST /api/v1/issues/{id}/comments", commentSchema],
   ["POST /api/v1/issues/{id}/bid", bidSchema],
   ["POST /api/v1/issues/{id}/extend", extendSchema],
-  ["POST /api/v1/issues/{id}/validations", validationBodySchema],
+  ["POST /api/v1/issues/{id}/confirmations", confirmationSchema],
   ["POST /api/v1/issues/{id}/test-results", testVerdictBodySchema],
+  ["POST /api/v1/issues/{id}/merge", mergeReviewBodySchema],
   ["POST /api/v1/questions", agentQuestionSchema],
   ["POST /api/v1/redesigns", redesignSchema],
 ];
@@ -59,27 +61,34 @@ describe("llms.txt request examples are accepted by the routes (#555)", () => {
     expect(createIdeaSchema.safeParse({ title: "A title", description: "A long enough description", idempotencyKey: "k" }).success).toBe(false);
   });
 
-  it("documents the validation fields the route requires", () => {
-    const validations = section("POST /api/v1/issues/{id}/validations");
-    for (const needle of ["`kind`", "`real`", "`format`", "`duplicate`", "`fix`", "`severity`"]) {
-      expect(validations).toContain(needle);
+  it("documents the confirmation fields the route requires", () => {
+    const confirmations = section("POST /api/v1/issues/{id}/confirmations");
+    for (const needle of ["`verdict`", "`confirm`", "`reject`", "`neutral`", "`summary`", "`description`", "`duplicateOfId`"]) {
+      expect(confirmations).toContain(needle);
     }
-    expect(requestBody("POST /api/v1/issues/{id}/validations")).toMatchObject({ kind: "real" });
+    // Confirmations take no severity, and the route refuses one.
+    expect(confirmations).not.toContain("`severity`");
+    expect(confirmationSchema.safeParse({ verdict: "confirm", summary: "Reproduced it.", description: "Followed the steps.", severity: "high" }).success).toBe(false);
+    expect(requestBody("POST /api/v1/issues/{id}/confirmations")).toMatchObject({ verdict: "confirm" });
+    // A bare verdict is refused, as the route refuses it.
+    expect(confirmationSchema.safeParse({ verdict: "confirm" }).success).toBe(false);
   });
 
-  it("documents the 201 validation response the route returns (#610)", () => {
-    const validations = section("POST /api/v1/issues/{id}/validations");
-    expect(validations).toContain("**Response (201):**");
-    expect(validations).toContain('"validation"');
-    expect(validations).toContain('"newly_confirmed"');
-    expect(validations).not.toContain('"validationId"');
-    expect(validations).not.toContain('"issueConfirmed"');
+  it("documents the 201 confirmation response the route returns (#610)", () => {
+    const confirmations = section("POST /api/v1/issues/{id}/confirmations");
+    expect(confirmations).toContain("**Response (201):**");
+    expect(confirmations).toContain('"confirmation"');
+    expect(confirmations).toContain('"newlyConfirmed"');
   });
 
-  it("documents the merge route without a body it never reads", () => {
+  it("documents the merge review fields the route requires (#review-entries)", () => {
     const merge = section("POST /api/v1/issues/{id}/merge");
-    expect(merge).not.toContain("**Request Body:**");
+    for (const needle of ["`summary`", "`description`", "verdict", "accept", "reject"]) expect(merge).toContain(needle);
     expect(merge).not.toContain("idempotencyKey");
+    expect(mergeReviewBodySchema.safeParse(requestBody("POST /api/v1/issues/{id}/merge")).success).toBe(true);
+    // A bare review is refused, as the route refuses it.
+    expect(mergeReviewBodySchema.safeParse({ verdict: "reject" }).success).toBe(false);
+    expect(testVerdictBodySchema.safeParse({ goodToMerge: true }).success).toBe(false);
   });
 
   it("lists only status values the routes accept", () => {

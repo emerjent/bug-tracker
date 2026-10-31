@@ -1,6 +1,6 @@
 # Ziki MCP server
 
-`packages/mcp-server` lets Claude Desktop, Claude Code and other MCP assistants use Ziki as native tools. The assistant sees `ziki_list_issues`, `ziki_comment`, `ziki_accept_offer` and so on, instead of being taught HTTP calls from a doc. Each tool wraps one route of the [agent API](./ziki-for-agents.md) with your agent's key.
+`packages/mcp-server` lets Claude Desktop, Claude Code and other MCP assistants use Ziki as native tools. The assistant sees `ziki_list_issues`, `ziki_comment` (a reply to one stage entry), `ziki_accept_offer` and so on, instead of being taught HTTP calls from a doc. Each tool wraps one route of the [agent API](./ziki-for-agents.md) with your agent's key.
 
 It needs Node 22 and a paired agent.
 
@@ -63,7 +63,7 @@ Each tool maps to one agent route and needs the agent class that route needs: `w
 
 ### Idea tools
 
-Every report is an idea, with its own number, apart from issues. Ideas take verdicts, not upvotes or comments; converting one creates the issue.
+Every report is an idea, with its own number, apart from issues. Ideas take verdicts, not importance marks or comments; converting one creates the issue.
 
 - `ziki_create_idea`: File a report (`POST /api/v1/ideas`). Needs an `idempotencyKey`; a similar open idea or issue answers `409 similar_issues` until you send `acknowledgeSimilar` (`working`).
 - `ziki_list_ideas`, `ziki_get_idea`: List ideas (`GET /api/v1/ideas`, by `status` or `convertible`) or read one by id or number (`working`).

@@ -11,6 +11,8 @@ import { IDEA_CONTRIBUTION_POINTS, ideaContributionSourceKey } from "@/lib/point
 import { workflowFor } from "@/lib/workflow";
 import { parseIssueRef } from "@/lib/issue-ref";
 import { createdSummary } from "@/lib/activity-log";
+import { ENTRY_SUMMARY_MAX_CHARS, entryDescription, entrySummary, sentenceCount } from "@/lib/agent-api/entry-fields";
+import { ideaVotes, isBadIdea, notRejectableReason } from "@/lib/idea-rejection";
 
 /**
  * Idea verdicts and conversion (#idea-verdicts, #idea-table). Each person
@@ -26,40 +28,24 @@ import { createdSummary } from "@/lib/activity-log";
  * the issue is then confirmed on its own.
  */
 
-export const IDEA_SUMMARY_MAX_CHARS = 300;
+export const IDEA_SUMMARY_MAX_CHARS = ENTRY_SUMMARY_MAX_CHARS;
 export const MAX_IDEA_VOTES = 5;
-const DESCRIPTION_MAX_CHARS = 10_000;
-
-/** Sentences end in `.`, `!` or `?` followed by a space or the end. */
-export function sentenceCount(text: string): number {
-  return text.trim().split(/(?<=[.!?])\s+/).filter((part) => part.trim()).length;
-}
+export { sentenceCount };
 
 const id = z.string().trim().min(1).max(191);
 
-/** `comment` was the description's name in the first version; still accepted for agents that send it. */
-const descriptionAlias = (body: unknown) =>
-  body && typeof body === "object" && !Array.isArray(body) && "comment" in body && !("description" in body)
-    ? (({ comment, ...rest }) => ({ ...rest, description: comment }))(body as Record<string, unknown>)
-    : body;
-
-/** The verdict body's fields. `ideaVerdictSchema` also accepts the old `comment` name. */
+/** The verdict body's fields. */
 export const ideaVerdictFields = z
   .object({
     projectId: id.optional(),
     opinion: z.enum(["good", "bad", "neutral"]),
     votes: z.number().int().min(1).max(MAX_IDEA_VOTES).optional(),
-    summary: z
-      .string()
-      .trim()
-      .min(1, "Add a summary.")
-      .max(IDEA_SUMMARY_MAX_CHARS, `Keep the summary under ${IDEA_SUMMARY_MAX_CHARS} characters.`)
-      .refine((text) => sentenceCount(text) <= 2, "Keep the summary to two sentences."),
-    description: z.string().trim().min(1, "Add a description explaining your verdict.").max(DESCRIPTION_MAX_CHARS),
+    summary: entrySummary,
+    description: entryDescription,
   })
   .strict();
 
-export const ideaVerdictSchema = z.preprocess(descriptionAlias, ideaVerdictFields);
+export const ideaVerdictSchema = ideaVerdictFields;
 
 export type IdeaVerdictInput = z.infer<typeof ideaVerdictSchema>;
 
@@ -123,7 +109,11 @@ function assertOpenIdea(idea: LockedIdea): void {
     const message = "This idea is an issue now. Verdicts only apply to open ideas.";
     throw new IssueApiError(409, message, { error: "idea_converted", message });
   }
-  if (idea.status !== "open") throw new IssueApiError(409, "This idea is closed.", { error: "idea_closed", message: "This idea is closed." });
+  if (idea.status === "rejected") {
+    const message = "This idea was rejected. Verdicts only apply to open ideas.";
+    throw new IssueApiError(409, message, { error: "idea_rejected", message });
+  }
+  if (idea.status !== "open") throw new IssueApiError(409, "This idea is not open.", { error: "idea_not_open", message: "This idea is not open." });
 }
 
 async function rescore(tx: Tx, ideaId: string): Promise<number> {
@@ -171,8 +161,15 @@ export async function giveIdeaVerdict(
     const ideaId = idea.id;
     const existing = await tx.ideaVerdict.findUnique({
       where: { ideaId_onBehalfOfUserId: { ideaId, onBehalfOfUserId: giver.userId } },
-      select: { id: true },
+      select: { id: true, opinion: true },
     });
+    // #727: once the score reaches the threshold, another good verdict changes
+    // nothing. A bad one still counts, so a late problem can stop the idea, and
+    // a person may still rewrite their own good verdict.
+    if (input.opinion === "good" && idea.score >= ideaThreshold && existing?.opinion !== "good") {
+      const message = `This idea already has the score it needs (${idea.score} of ${ideaThreshold}) and is waiting for a manager to convert it. Another good verdict changes nothing; give a bad one only if you found a real problem.`;
+      throw new IssueApiError(409, message, { error: "enough_verdicts", message, ideaScore: idea.score, ideaThreshold });
+    }
     const data = {
       agentId: giver.agent?.id ?? null,
       opinion: input.opinion,
@@ -284,7 +281,7 @@ export async function convertIdea(agent: AgentContext, projectId: string, ideaRe
     const idea = await tx.idea.findUniqueOrThrow({
       where: { id: locked.id },
       select: {
-        title: true, description: true, typeId: true, categoryId: true, areaId: true, proofLinks: true,
+        title: true, summary: true, description: true, typeId: true, categoryId: true, areaId: true, proofLinks: true,
         reporterId: true, beneficiaryUserId: true, createdByAgentId: true,
       },
     });
@@ -294,6 +291,7 @@ export async function convertIdea(agent: AgentContext, projectId: string, ideaRe
         tenantId: agent.tenantId,
         projectId,
         title: idea.title,
+        summary: idea.summary,
         description: idea.description,
         typeId: idea.typeId,
         categoryId: idea.categoryId,
@@ -302,7 +300,7 @@ export async function convertIdea(agent: AgentContext, projectId: string, ideaRe
         reporterId: idea.reporterId,
         beneficiaryUserId: idea.beneficiaryUserId,
         createdByAgentId: idea.createdByAgentId,
-        status: "open",
+        status: "requires_confirmation",
         watches: { create: { userId: idea.reporterId } },
         activities: {
           create: { actorId: idea.reporterId, type: "created", summary: createdSummary(idea.title), metadata: { fromIdea: locked.number } },
@@ -349,4 +347,36 @@ export async function convertIdea(agent: AgentContext, projectId: string, ideaRe
     { bugId: converted.issueId },
   );
   return converted;
+}
+
+/**
+ * A manager agent rejects a bad open idea (#idea-rejected): its votes reach
+ * the project's idea threshold and its bad and neutral votes outnumber its
+ * good ones (lib/idea-rejection.ts). It moves to Rejected ideas and takes no
+ * more verdicts.
+ */
+export async function rejectIdea(agent: AgentContext, projectId: string, ideaRef: string) {
+  requireLevel(agent, "manager");
+  const { ideaThreshold } = await workflowFor(projectId);
+  const rejected = await prisma.$transaction(async (tx) => {
+    const locked = await lockedIdea(tx, { tenantId: agent.tenantId, projectId }, ideaRef);
+    assertOpenIdea(locked);
+    const votes = ideaVotes(await tx.ideaVerdict.findMany({ where: { ideaId: locked.id }, select: { opinion: true, votes: true } }));
+    if (!isBadIdea(votes, ideaThreshold)) {
+      const message = notRejectableReason(votes, ideaThreshold);
+      throw new IssueApiError(409, message, { error: "not_rejectable", message, totalVotes: votes.total, goodVotes: votes.good });
+    }
+    const at = new Date();
+    await tx.idea.update({ where: { id: locked.id }, data: { status: "rejected", rejectedAt: at, rejectedByAgentId: agent.agentId } });
+    await publish(tx, {
+      tenantId: agent.tenantId,
+      type: "idea.rejected",
+      actorAgentId: agent.agentId,
+      projectId,
+      payload: { ideaId: locked.id, ideaNumber: locked.number, projectId, totalVotes: votes.total, goodVotes: votes.good, ideaScore: locked.score },
+    });
+    return { ideaId: locked.id, ideaNumber: locked.number, status: "rejected" as const, rejectedAt: at.toISOString(), totalVotes: votes.total, goodVotes: votes.good };
+  });
+  await audit(agent, "idea.rejected", `idea:${rejected.ideaId}`, { totalVotes: rejected.totalVotes, goodVotes: rejected.goodVotes });
+  return rejected;
 }

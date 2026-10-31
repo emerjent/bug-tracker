@@ -38,19 +38,20 @@ describe("parseBugListFilters", () => {
     expect(asAdmin.isDeletedView).toBe(true);
   });
 
-  it("applies status and severity only when they are real values", () => {
+  it("applies status only when it is a real value", () => {
     expect(parse({ status: "open" }).where.status).toBe("open");
-    expect(parse({ severity: "critical" }).where.severity).toBe("critical");
     expect(parse({ status: "sideways" }).where.status).toBeUndefined();
-    expect(parse({ severity: "spicy" }).where.severity).toBeUndefined();
   });
 
-  it("applies reviewStatus only when it is a valid lifecycle phase", () => {
-    expect(parse({ reviewStatus: "submitted" }).where.reviewStatus).toBe("submitted");
-    expect(parse({ reviewStatus: "ready_to_merge" }).where.reviewStatus).toBe("ready_to_merge");
-    expect(parse({ reviewStatus: "rejected" }).where.reviewStatus).toBe("rejected");
-    expect(parse({ reviewStatus: "merged" }).where.reviewStatus).toBe("merged");
-    expect(parse({ reviewStatus: "invalid" }).where.reviewStatus).toBeUndefined();
+  it("has no severity filter: a severity param changes nothing", () => {
+    expect(parse({ severity: "critical" })).toEqual(parse({}));
+    expect(parse({ severity: "critical" }).where).not.toHaveProperty("severity");
+  });
+
+  it("filters every pipeline step by the one status", () => {
+    expect(parse({ status: "done" }).where.status).toBe("done");
+    expect(parse({ status: "ready_to_merge" }).where.status).toBe("ready_to_merge");
+    expect(parse({ reviewStatus: "submitted" }).where).not.toHaveProperty("reviewStatus");
   });
 
   it("understands the finished aggregate the stat grid links to (#685)", () => {
@@ -60,7 +61,7 @@ describe("parseBugListFilters", () => {
       in: ["resolved", "closed"],
     });
     // Same parsing as the list, so an unknown token still means no filter.
-    expect(parse({ status: "done" }).where.status).toBeUndefined();
+    expect(parse({ status: "sideways" }).where.status).toBeUndefined();
   });
 
   it("scopes to the signed-in user for the mine filter", () => {
@@ -117,9 +118,9 @@ describe("parseBugListFilters", () => {
   });
 
   it("defaults the sort and accepts a real one", () => {
-    expect(parse({}).sort).toBe("top_votes");
+    expect(parse({}).sort).toBe("importance");
     expect(parse({ sort: "newest" }).sort).toBe("newest");
-    expect(parse({ sort: "nonsense" }).sort).toBe("top_votes");
+    expect(parse({ sort: "nonsense" }).sort).toBe("importance");
   });
 
   it("takes the first value when a param is repeated", () => {
@@ -127,11 +128,10 @@ describe("parseBugListFilters", () => {
   });
 
   it("combines filters rather than letting the last one win", () => {
-    const where = parse({ status: "open", severity: "high", mine: "reported" }).where;
+    const where = parse({ status: "open", mine: "reported", q: "login" }).where;
     expect(where).toMatchObject({
       isDeleted: false,
       status: "open",
-      severity: "high",
       reporterId: "u1",
     });
   });

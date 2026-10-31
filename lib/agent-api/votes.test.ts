@@ -17,6 +17,8 @@ const db = vi.hoisted(() => ({
 
 vi.mock("@/lib/prisma", () => ({ prisma: db }));
 
+const mark = { agentId: "agent-1" };
+
 const agent = {
   agentId: "agent-1",
   name: "Ada",
@@ -46,29 +48,30 @@ describe("agent upvotes", () => {
 
     const result = await upvoteIssue(agent, projectId, bugId);
 
-    expect(result).toEqual({ voted: true, voteCount: 1, changed: true, weight: 1 });
+    expect(result).toEqual({ important: true, importance: 1, changed: true, weight: 1 });
     expect(db.vote.create).toHaveBeenCalledWith({
-      data: { userId: "user-ada", bugId, value: 1 },
+      data: { userId: "user-ada", bugId, value: 1, ...mark },
     });
     expect(db.bug.update).toHaveBeenCalledWith({ where: { id: bugId }, data: { voteCount: 1 } });
     expect(db.agentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        type: "issue.voted",
+        type: "issue.importance",
         actorAgentId: "agent-1",
         bugId,
-        payload: expect.objectContaining({ userId: "user-ada", voteCount: 1, voted: true }),
+        payload: expect.objectContaining({ userId: "user-ada", importance: 1, important: true }),
       }),
     }));
   });
 
-  it("does not add a second upvote when the owner already voted", async () => {
-    db.vote.findUnique.mockResolvedValue({ id: "vote-1", value: 1 });
+  it("changes nothing when the owner already marked it with this weight", async () => {
+    db.vote.findUnique.mockResolvedValue({ id: "vote-1", value: 1, agentId: null });
     db.bug.findUnique.mockResolvedValue({ voteCount: 3 });
 
     const result = await upvoteIssue(agent, projectId, bugId);
 
-    expect(result).toEqual({ voted: true, voteCount: 3, changed: false, weight: 1 });
+    expect(result).toEqual({ important: true, importance: 3, changed: false, weight: 1 });
     expect(db.vote.create).not.toHaveBeenCalled();
+    expect(db.vote.update).not.toHaveBeenCalled();
     expect(db.agentEvent.create).not.toHaveBeenCalled();
   });
 
@@ -79,7 +82,7 @@ describe("agent upvotes", () => {
     const result = await upvoteIssue(agent, projectId, bugId);
 
     expect(result.changed).toBe(true);
-    expect(db.vote.update).toHaveBeenCalledWith({ where: { id: "vote-1" }, data: { value: 1 } });
+    expect(db.vote.update).toHaveBeenCalledWith({ where: { id: "vote-1" }, data: { value: 1, ...mark } });
   });
 
   it("removes the owner upvote and recounts", async () => {
@@ -88,12 +91,12 @@ describe("agent upvotes", () => {
 
     const result = await removeUpvote(agent, projectId, bugId);
 
-    expect(result).toEqual({ voted: false, voteCount: 0, changed: true, weight: 0 });
+    expect(result).toEqual({ important: false, importance: 0, changed: true, weight: 0 });
     expect(db.vote.delete).toHaveBeenCalledWith({ where: { id: "vote-1" } });
     expect(db.agentEvent.create).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
-        type: "issue.voted",
-        payload: expect.objectContaining({ voted: false, voteCount: 0 }),
+        type: "issue.importance",
+        payload: expect.objectContaining({ important: false, importance: 0 }),
       }),
     }));
   });
@@ -109,9 +112,9 @@ describe("agent upvotes", () => {
     const result = await upvoteIssue({ ...agent, level: "manager" }, projectId, bugId);
 
     expect(db.vote.create).toHaveBeenCalledWith({
-      data: { userId: "user-ada", bugId, value: MANAGER_VOTE_WEIGHT },
+      data: { userId: "user-ada", bugId, value: MANAGER_VOTE_WEIGHT, ...mark },
     });
-    expect(result).toEqual({ voted: true, voteCount: 2 + MANAGER_VOTE_WEIGHT, changed: true, weight: MANAGER_VOTE_WEIGHT });
+    expect(result).toEqual({ important: true, importance: 2 + MANAGER_VOTE_WEIGHT, changed: true, weight: MANAGER_VOTE_WEIGHT });
     expect(db.bug.update).toHaveBeenCalledWith({ where: { id: bugId }, data: { voteCount: 2 + MANAGER_VOTE_WEIGHT } });
   });
 
@@ -131,7 +134,7 @@ describe("agent upvotes", () => {
     const result = await upvoteIssue({ ...agent, level: "manager" }, projectId, bugId);
 
     expect(result.changed).toBe(true);
-    expect(db.vote.update).toHaveBeenCalledWith({ where: { id: "vote-1" }, data: { value: MANAGER_VOTE_WEIGHT } });
+    expect(db.vote.update).toHaveBeenCalledWith({ where: { id: "vote-1" }, data: { value: MANAGER_VOTE_WEIGHT, ...mark } });
   });
 
   it("counts a manager agent's upvote once on its owner's own report", async () => {
@@ -142,7 +145,7 @@ describe("agent upvotes", () => {
     const result = await upvoteIssue({ ...agent, level: "manager" }, projectId, bugId);
 
     expect(result.weight).toBe(1);
-    expect(db.vote.create).toHaveBeenCalledWith({ data: { userId: "user-ada", bugId, value: 1 } });
+    expect(db.vote.create).toHaveBeenCalledWith({ data: { userId: "user-ada", bugId, value: 1, ...mark } });
   });
 
   it("leaves the count alone when the owner has no upvote", async () => {
@@ -151,7 +154,7 @@ describe("agent upvotes", () => {
 
     const result = await removeUpvote(agent, projectId, bugId);
 
-    expect(result).toEqual({ voted: false, voteCount: 2, changed: false, weight: 0 });
+    expect(result).toEqual({ important: false, importance: 2, changed: false, weight: 0 });
     expect(db.vote.delete).not.toHaveBeenCalled();
   });
 });

@@ -14,7 +14,6 @@ import {
   commentPreview,
   deletedSummary,
   restoredSummary,
-  severityChangedSummary,
   statusChangedSummary,
   typeChangedSummary,
   unboostedSummary,
@@ -27,7 +26,6 @@ import {
   resolveSessionUserId,
   SESSION_EXPIRED_MESSAGE,
 } from "@/lib/session-user";
-import { MAX_COMMENT_DEPTH, commentDepth } from "@/lib/comments";
 import {
   extractMentionedUserIds,
   newlyMentionedUserIds,
@@ -85,7 +83,7 @@ import {
 } from "@/lib/tenant-context";
 import { currentTenantAccess } from "@/lib/tenant-access";
 import { awardSolver } from "@/lib/points/award";
-import { isConfirmed } from "@/lib/agent-api/validation";
+import { isConfirmed } from "@/lib/agent-api/confirmations";
 import { correct } from "@/lib/points/correct";
 import { pointSourceKey } from "@/lib/points/rules";
 import {
@@ -96,7 +94,8 @@ import {
 } from "@/lib/rate-limit";
 import { publish } from "@/lib/agent-api/events";
 import { issueChangePayload, publishWebEvent } from "@/lib/agent-api/web-events";
-import { firstPullRequestLink, pullRequestAttachment } from "@/lib/github/pr-mention";
+import { firstPullRequestLink } from "@/lib/github/pr-mention";
+import { CommentPlacementError, placeComment, type CommentPlacement } from "@/lib/comment-placement";
 import { isPullRequestClosedUnmerged, standingAcceptance } from "@/lib/github/merge-pr";
 import {
   agentMentionNames,
@@ -186,7 +185,7 @@ async function requireUserId() {
 /**
  * Files a report as the signed-in user. Every report is an idea
  * (#idea-table): it takes verdicts until a manager agent converts it, which
- * creates the issue. Ideas have no severity and no assignee.
+ * creates the issue. Ideas have no assignee.
  */
 export async function createBugAction(
   formData: FormData,
@@ -219,7 +218,6 @@ export async function createBugAction(
   const parsed = createBugSchema.safeParse({
     title: titleStr,
     description: formData.get("description"),
-    severity: "medium",
     typeId: formData.get("typeId") || "",
     assigneeId: "",
     categoryId: formData.get("categoryId") || "",
@@ -339,7 +337,7 @@ export async function createBugAction(
   redirect(ideaPath(idea.number));
 }
 
-/** Updates status (assignee/admin) and severity/assignee (admin) and logs activity. */
+/** Updates status (assignee/admin) and type/assignee (admin) and logs activity. */
 export async function updateBugAction(
   bugId: string,
   formData: FormData,
@@ -426,7 +424,6 @@ export async function updateBugAction(
   const typeRaw = formData.get("typeId");
   const parsed = updateBugSchema.safeParse({
     status: requestedStatus,
-    severity: admin ? formData.get("severity") || undefined : undefined,
     typeId: admin
       ? typeRaw === "" || typeRaw === "none"
         ? null
@@ -487,7 +484,6 @@ export async function updateBugAction(
 
   const data: {
     status?: typeof parsed.data.status;
-    severity?: typeof parsed.data.severity;
     typeId?: string | null;
     assigneeId?: string | null;
     categoryId?: string | null;
@@ -499,7 +495,6 @@ export async function updateBugAction(
 
   if (parsed.data.status) data.status = parsed.data.status;
   if (admin) {
-    if (parsed.data.severity) data.severity = parsed.data.severity;
     if (parsed.data.typeId !== undefined) {
       data.typeId = parsed.data.typeId === "" ? null : parsed.data.typeId;
     }
@@ -550,18 +545,6 @@ export async function updateBugAction(
       type: "unboosted",
       summary: unboostedSummary(),
       metadata: { field: "isBoosted", to: "false" },
-    });
-  }
-
-  if (data.severity && data.severity !== existing.severity) {
-    pending.push({
-      type: "severity_changed",
-      summary: severityChangedSummary(existing.severity, data.severity),
-      metadata: {
-        field: "severity",
-        from: existing.severity,
-        to: data.severity,
-      },
     });
   }
 
@@ -741,9 +724,9 @@ export async function updateBugAction(
         // The new assignee starts watching (#216).
         await ensureWatching(tx, bugId, [data.assigneeId]);
       }
-      // Admin assignment follows the dispatcher (offer) flow: creating or
+      // Admin assignment follows the offer flow: creating or
       // reassigning an assignee produces an offered IssueClaim for that
-      // user's agent, mirroring POST /api/v1/issues/{id}/offer. Releasing
+      // user's agent, as an awarded bid does. Releasing
       // any prior active/offered claim first keeps the cap slot free.
       const assigneeChanged =
         data.assigneeId !== undefined && data.assigneeId !== existing.assigneeId;
@@ -815,7 +798,6 @@ export async function updateBugAction(
           tenantId: existing.tenantId,
           projectId: existing.projectId,
           pullRequestUrl: existing.pullRequestUrl,
-          severity: data.severity ?? existing.severity,
           assigneeId: data.assigneeId !== undefined ? data.assigneeId : existing.assigneeId,
         });
       }
@@ -996,6 +978,7 @@ export async function editBugContentAction(
       description: true,
       reporterId: true,
       beneficiaryUserId: true,
+      status: true,
       tenantId: true,
       isDeleted: true,
     },
@@ -1043,6 +1026,8 @@ export async function editBugContentAction(
     // none goes missing from the history.
     const [previous] = await tx.$queryRaw<{ title: string; description: string }[]>`
       SELECT "title", "description" FROM "Bug" WHERE "id" = ${bugId} FOR UPDATE`;
+    // Read before the revision below voids the confirmations.
+    const wasConfirmed = await isConfirmed(bugId, tx);
     await tx.bugRevision.create({
       data: {
         bugId,
@@ -1052,20 +1037,19 @@ export async function editBugContentAction(
       },
     });
 
-    // #713: Editing an issue invalidates confirmations and previous validations,
-    // and reverses any reporter points awarded for the replaced report.
+    // #713: Editing an issue voids its confirmations and reverses any
+    // reporter points awarded for the replaced report. The entries and their
+    // replies stay (a person wrote them), but only entries given after the
+    // latest edit count (lib/issue-stage.ts), so this revision clears them:
+    // each person gives theirs again to count.
     type OptionalTxExtensions = {
       pointEntry?: {
         findFirst?: (args: unknown) => Promise<{ id: string; tenantId: string; userId: string; bugId: string | null; role: "solver" | "reporter" | "reviewer"; points: number } | null>;
         update?: (args: unknown) => Promise<unknown>;
       };
-      issueValidation?: {
-        deleteMany?: (args: unknown) => Promise<unknown>;
-      };
     };
     const txExtensions = tx as unknown as OptionalTxExtensions;
 
-    const wasConfirmed = await isConfirmed(bugId, tx);
     if (wasConfirmed) {
       const recipientId = existing.beneficiaryUserId ?? existing.reporterId;
       const tenantId = existing.tenantId ?? (await currentTenantIdFor(userId));
@@ -1091,18 +1075,14 @@ export async function editBugContentAction(
       }
     }
 
-    if (typeof txExtensions.issueValidation?.deleteMany === "function") {
-      await txExtensions.issueValidation.deleteMany({
-        where: { bugId },
-      });
-    }
-
     await tx.bug.update({
       where: { id: bugId },
       data: {
         title: parsed.data.title,
         description: normalizedDescription,
         updatedAt: new Date(),
+        // #requires-confirmation: the edit voided its confirmations, so an Open issue needs confirming again.
+        ...(existing.status === "open" ? { status: "requires_confirmation" as const } : {}),
       },
     });
 
@@ -1285,7 +1265,10 @@ export async function editProofLinksAction(
   return { ok: true };
 }
 
-/** Adds a (possibly threaded) comment to a bug and records the activity. */
+/**
+ * Adds a comment to a bug and records the activity: a reply to one stage
+ * entry, or, while the issue is Open, a comment on it or a reply to one.
+ */
 export async function addCommentAction(
   bugId: string,
   formData: FormData,
@@ -1300,21 +1283,14 @@ export async function addCommentAction(
     return { error: RATE_LIMIT_MESSAGE };
   }
 
-  let metadata: Record<string, unknown> | undefined;
-  const metadataRaw = formData.get("metadata");
-  if (typeof metadataRaw === "string" && metadataRaw.trim()) {
-    try {
-      metadata = JSON.parse(metadataRaw);
-    } catch {
-      // ignore invalid json metadata
-    }
-  }
-
   const parsed = commentSchema.safeParse({
     body: formData.get("body"),
+    confirmationId: formData.get("confirmationId") || undefined,
+    bidId: formData.get("bidId") || undefined,
+    deliveryId: formData.get("deliveryId") || undefined,
+    testVerdictId: formData.get("testVerdictId") || undefined,
+    mergeReviewId: formData.get("mergeReviewId") || undefined,
     parentId: formData.get("parentId") || undefined,
-    type: formData.get("type") || undefined,
-    metadata,
   });
 
   if (!parsed.success) {
@@ -1330,60 +1306,40 @@ export async function addCommentAction(
       reporterId: true,
       assigneeId: true,
       tenantId: true,
+      status: true,
       pullRequestUrl: true,
-      proofLinks: true,
     },
   });
   if (!bug || bug.isDeleted) {
     return { error: "Issue not found" };
   }
 
-  const parentId = parsed.data.parentId;
-  let parentAuthorId: string | null = null;
-
-  if (parentId) {
-    const parent = await prisma.comment.findUnique({
-      where: { id: parentId },
-      select: { id: true, bugId: true, parentId: true, deletedAt: true, authorId: true },
-    });
-
-    if (!parent || parent.bugId !== bugId) {
-      return { error: "Parent comment not found on this issue" };
-    }
-    if (parent.deletedAt) {
-      return { error: "You can't reply to a deleted comment" };
-    }
-    parentAuthorId = parent.authorId;
-
-    const threadComments = await prisma.comment.findMany({
-      where: { bugId },
-      select: { id: true, parentId: true },
-    });
-    const parentById = new Map(
-      threadComments.map((c) => [c.id, c.parentId] as const),
-    );
-    const parentDepth = commentDepth(parent.id, parentById);
-
-    if (parentDepth >= MAX_COMMENT_DEPTH) {
-      return {
-        error: `Replies are limited to ${MAX_COMMENT_DEPTH} levels of nesting`,
-      };
-    }
+  // One rule for where a comment may go, as for agents (lib/comment-placement.ts).
+  let placement: CommentPlacement;
+  try {
+    placement = await placeComment(prisma, bug, parsed.data);
+  } catch (error) {
+    if (error instanceof CommentPlacementError) return { error: error.message };
+    throw error;
   }
+  const { confirmationId, bidId, deliveryId, testVerdictId, mergeReviewId, parentId, parentAuthorId } = placement;
 
   // #603: only agents in this issue's organization can be mentioned.
   const agents = await mentionedAgents(prisma, bug.tenantId, parsed.data.body);
   const normalizedBody = await normalizeMentionTags(parsed.data.body, bug.tenantId, agents);
 
-  const { commentId, attachedPrUrl } = await prisma.$transaction(async (tx) => {
+  const commentId = await prisma.$transaction(async (tx) => {
     const created = await tx.comment.create({
       data: {
         bugId,
         authorId: userId,
         body: normalizedBody,
-        parentId: parentId ?? null,
-        type: parsed.data.type ?? "comment",
-        metadata: parsed.data.metadata ? (parsed.data.metadata as Prisma.InputJsonValue) : undefined,
+        confirmationId,
+        bidId,
+        deliveryId,
+        testVerdictId,
+        mergeReviewId,
+        parentId,
       },
       select: { id: true },
     });
@@ -1412,36 +1368,7 @@ export async function addCommentAction(
         } as Prisma.InputJsonValue,
       },
     });
-    let attachedPrUrl: string | null = null;
-    const attachment = pullRequestAttachment({
-      authorId: userId,
-      assigneeId: bug.assigneeId,
-      pullRequestUrl: bug.pullRequestUrl,
-      proofLinks: bug.proofLinks ?? [],
-      body: normalizedBody,
-      type: parsed.data.type,
-      metadata: parsed.data.metadata as Record<string, unknown> | undefined,
-    });
-    if (attachment) attachedPrUrl = attachment.pullRequestUrl;
-    await tx.bug.update({
-      where: { id: bugId },
-      data: {
-        updatedAt: new Date(),
-        ...(attachment ? { pullRequestUrl: attachment.pullRequestUrl } : {}),
-        ...(attachment?.proofLinks ? { proofLinks: attachment.proofLinks } : {}),
-      },
-    });
-    if (attachment) {
-      await tx.bugActivity.create({
-        data: {
-          bugId,
-          actorId: userId,
-          type: "edited",
-          summary: `linked PR ${attachment.pullRequestUrl}`,
-          metadata: { field: "pullRequestUrl", pullRequestUrl: attachment.pullRequestUrl, via: "comment" },
-        },
-      });
-    }
+    await tx.bug.update({ where: { id: bugId }, data: { updatedAt: new Date() } });
     // Commenting on an issue means you want to hear about replies (#216).
     await ensureWatching(tx, bugId, [userId]);
     // #600: a person's reply reaches the agents polling /api/v1/events.
@@ -1451,12 +1378,11 @@ export async function addCommentAction(
       actorUserId: userId,
       payload: {
         commentId: created.id,
-        parentId: parentId ?? null,
+        parentId,
         authorId: userId,
-        ...(attachment ? { linkedPullRequestUrl: attachment.pullRequestUrl } : {}),
       },
     });
-    return { commentId: created.id, attachedPrUrl };
+    return created.id;
   });
 
   // A mentioned agent's owner hears about it like a mention of them (#603).
@@ -1490,7 +1416,7 @@ export async function addCommentAction(
   revalidateIssue(bugId);
   revalidatePath("/bugs");
   revalidatePath(`/bugs/${bugId}`);
-  return { ok: true, commentId, ...(attachedPrUrl ? { linkedPullRequestUrl: attachedPrUrl } : {}) };
+  return { ok: true, commentId };
 }
 
 export type ToggleVoteResult = ActionResult & {
@@ -1501,7 +1427,11 @@ export type ToggleVoteResult = ActionResult & {
   dislikeCount?: number;
 };
 
-/** Toggles the current user's reaction on a bug; rejects any direction other than 1 or -1. */
+/**
+ * Toggles the current user's importance mark on an issue (#importance; once an
+ * upvote). Rejects any direction other than
+ * 1 or -1, and -1 because downvotes are gone.
+ */
 export async function toggleVoteAction(
   bugId: string,
   direction: unknown = 1,
@@ -1553,9 +1483,10 @@ export async function toggleVoteAction(
     if (nextVote === 0 && existing) {
       await tx.vote.delete({ where: { id: existing.id } });
     } else if (existing) {
+      // #importance: a person's own click; no agent made it.
       await tx.vote.update({
         where: { id: existing.id },
-        data: { value: nextVote },
+        data: { value: nextVote, agentId: null },
       });
     } else {
       await tx.vote.create({

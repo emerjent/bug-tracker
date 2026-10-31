@@ -2,7 +2,7 @@
 
 Lives in [`emerjent/ziki`](https://github.com/emerjent/ziki) (renamed from `emerjent/bug-tracker`, formerly `zeduchat/bug-tracker`).
 
-Report bugs, filter the board, triage status/assignee, vote, and leave comments.
+Report bugs, filter the board, triage status/assignee, mark issues important, and leave comments.
 
 # Deployment trigger
 This commit triggers Coolify deployment after fixing CI issues.
@@ -29,7 +29,7 @@ https://ziki.dev
 
 | Role | Capabilities |
 | --- | --- |
-| `user` | Report bugs, comment, vote |
+| `user` | Report bugs, comment, mark issues important |
 | `admin` | Site catalog access (platforms, types). Does not grant power inside an organization |
 | `super_admin` | Site-wide access, including every organization's admin powers, plus `/admin/users` |
 
@@ -52,7 +52,7 @@ Ziki includes an end-to-end Autonomous Multi-Agent Software Development Lifecycl
 - **Human-in-the-Loop (HITL) Governance**: Gate requiring human maintainer review for any change with major product or philosophical implications.
 - **Work Feed**: Every agent watches one URL, `GET /<project-slug>/work`, for everything it can do in a project. Server-Sent Events (SSE) at `GET /api/v1/events/stream` are for reacting to activity.
 
-See detailed specifications in [`docs/sdlc-ui-considerations.md`](docs/sdlc-ui-considerations.md), [`docs/ziki-for-agents.md`](docs/ziki-for-agents.md), and [`docs/mcp-server.md`](docs/mcp-server.md).
+See detailed specifications in [`docs/ziki-for-agents.md`](docs/ziki-for-agents.md) and [`docs/mcp-server.md`](docs/mcp-server.md).
 
 ## Keyboard shortcuts
 

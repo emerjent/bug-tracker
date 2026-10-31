@@ -17,7 +17,7 @@ vi.mock("@/lib/prisma", () => ({ prisma: db }));
 vi.mock("@/lib/agent-api/events", () => ({ publish }));
 vi.mock("@/lib/agents/audit", () => ({ audit }));
 
-import { convertIdea, giveIdeaVerdict, ideaVerdictSchema, maxVotesFor, sentenceCount, verdictScore } from "./idea-verdicts";
+import { convertIdea, giveIdeaVerdict, ideaVerdictSchema, maxVotesFor, rejectIdea, sentenceCount, verdictScore } from "./idea-verdicts";
 
 /** The locked idea row (#idea-table): ideas have their own table, numbers and status. */
 const idea = (overrides: Record<string, unknown> = {}) => ({
@@ -35,6 +35,7 @@ const idea = (overrides: Record<string, unknown> = {}) => ({
 
 const report = {
   title: "Show an icon for the activity log",
+  summary: "The activity list is long and hard to scan without an icon.",
   description: "The activity list is long.",
   typeId: null,
   categoryId: "web",
@@ -68,9 +69,9 @@ describe("the verdict rules", () => {
     expect(ideaVerdictSchema.safeParse({ ...input, summary: "One. Two. Three." }).success).toBe(false);
     expect(ideaVerdictSchema.safeParse({ ...input, summary: "x".repeat(301) }).success).toBe(false);
     expect(ideaVerdictSchema.safeParse({ ...input, description: " " }).success).toBe(false);
-    // `comment` was the description's first name; agents that still send it keep working.
+    // One name for each field: `comment` is not `description`.
     const { description, ...withoutDescription } = input;
-    expect(ideaVerdictSchema.parse({ ...withoutDescription, comment: description })).toMatchObject({ description });
+    expect(ideaVerdictSchema.safeParse({ ...withoutDescription, comment: description }).success).toBe(false);
     expect(ideaVerdictSchema.safeParse({ ...input, opinion: "great" }).success).toBe(false);
   });
 
@@ -87,6 +88,11 @@ describe("the verdict rules", () => {
 });
 
 describe("giveIdeaVerdict", () => {
+  // An idea still short of the threshold (3), so a good verdict counts.
+  beforeEach(() => {
+    db.$queryRaw.mockResolvedValue([idea({ score: 0 })]);
+  });
+
   it("records the verdict on the idea, rescores it and pays the first point", async () => {
     const result = await giveIdeaVerdict(person, "p1", "7", input);
     expect(db.ideaVerdict.upsert).toHaveBeenCalledWith(expect.objectContaining({
@@ -129,6 +135,34 @@ describe("giveIdeaVerdict", () => {
     await expect(giveIdeaVerdict(manager, "p1", "i1", { ...input, votes: 5 })).resolves.toMatchObject({ ideaScore: 5, convertible: true });
   });
 
+  it("refuses another good verdict once the idea reached the threshold, and pays nothing (#727)", async () => {
+    db.$queryRaw.mockResolvedValue([idea({ score: 3 })]);
+    await expect(giveIdeaVerdict(person, "p1", "i1", input)).rejects.toMatchObject({
+      status: 409,
+      body: { error: "enough_verdicts", ideaScore: 3, ideaThreshold: 3 },
+    });
+    // A bad verdict on the way in doesn't turn it into a good one either.
+    db.ideaVerdict.findUnique.mockResolvedValue({ id: "v1", opinion: "bad" });
+    await expect(giveIdeaVerdict(person, "p1", "i1", input)).rejects.toMatchObject({ status: 409, body: { error: "enough_verdicts" } });
+    expect(db.ideaVerdict.upsert).not.toHaveBeenCalled();
+    expect(db.pointEntry.createMany).not.toHaveBeenCalled();
+  });
+
+  it("still takes a bad verdict at the threshold, so a late problem can stop the idea (#727)", async () => {
+    db.$queryRaw.mockResolvedValue([idea({ score: 3 })]);
+    db.ideaVerdict.findMany.mockResolvedValue([{ opinion: "good", votes: 3 }, { opinion: "bad", votes: 1 }]);
+    const result = await giveIdeaVerdict(person, "p1", "i1", { ...input, opinion: "bad" });
+    expect(result).toMatchObject({ ideaScore: 2, convertible: false });
+    expect(db.ideaVerdict.upsert).toHaveBeenCalled();
+  });
+
+  it("lets a person rewrite their own good verdict at the threshold (#727)", async () => {
+    db.$queryRaw.mockResolvedValue([idea({ score: 3 })]);
+    db.ideaVerdict.findUnique.mockResolvedValue({ id: "v1", opinion: "good" });
+    db.ideaVerdict.findMany.mockResolvedValue([{ opinion: "good", votes: 3 }]);
+    await expect(giveIdeaVerdict(person, "p1", "i1", input)).resolves.toMatchObject({ replaced: true, ideaScore: 3 });
+  });
+
   it("refuses more votes than the giver may give", async () => {
     await expect(giveIdeaVerdict(person, "p1", "i1", { ...input, votes: 2 })).rejects.toMatchObject({ status: 422, body: { error: "too_many_votes", maxVotes: 1 } });
     expect(db.ideaVerdict.upsert).not.toHaveBeenCalled();
@@ -138,8 +172,8 @@ describe("giveIdeaVerdict", () => {
     await expect(giveIdeaVerdict({ ...person, userId: "ada" }, "p1", "i1", input)).rejects.toMatchObject({ status: 403, body: { error: "own_idea" } });
     db.$queryRaw.mockResolvedValue([idea({ status: "converted" })]);
     await expect(giveIdeaVerdict(person, "p1", "i1", input)).rejects.toMatchObject({ status: 409, body: { error: "idea_converted" } });
-    db.$queryRaw.mockResolvedValue([idea({ status: "closed" })]);
-    await expect(giveIdeaVerdict(person, "p1", "i1", input)).rejects.toMatchObject({ status: 409, body: { error: "idea_closed" } });
+    db.$queryRaw.mockResolvedValue([idea({ status: "rejected" })]);
+    await expect(giveIdeaVerdict(person, "p1", "i1", input)).rejects.toMatchObject({ status: 409, body: { error: "idea_rejected" } });
     db.$queryRaw.mockResolvedValue([]);
     await expect(giveIdeaVerdict(person, "p1", "i1", input)).rejects.toMatchObject({ status: 404 });
     expect(db.ideaVerdict.upsert).not.toHaveBeenCalled();
@@ -159,12 +193,13 @@ describe("convertIdea", () => {
         tenantId: "t1",
         projectId: "p1",
         title: report.title,
+        summary: report.summary,
         description: report.description,
         categoryId: "web",
         reporterId: "ada",
         beneficiaryUserId: "ada",
         createdByAgentId: "agent-ada",
-        status: "open",
+        status: "requires_confirmation",
       }),
     }));
     expect(db.attachment.updateMany).toHaveBeenCalledWith({ where: { ideaId: "i1" }, data: { bugId: "b9" } });
@@ -193,6 +228,64 @@ describe("convertIdea", () => {
     db.$queryRaw.mockResolvedValue([idea({ status: "converted" })]);
     await expect(convertIdea(manager("manager"), "p1", "i1")).rejects.toMatchObject({ status: 409, body: { error: "idea_converted" } });
     expect(db.bug.create).not.toHaveBeenCalled();
+    expect(db.idea.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("rejectIdea (#idea-rejected)", () => {
+  const manager = (level: AgentContext["level"], ownerId = "dana"): AgentContext => ({
+    agentId: `agent-${ownerId}`, name: ownerId, ownerId, tenantId: "t1", level, burst: false, keyId: "k1",
+  });
+  const verdicts = (good: number, bad: number) => [
+    ...Array.from({ length: good }, () => ({ opinion: "good", votes: 1 })),
+    ...Array.from({ length: bad }, () => ({ opinion: "bad", votes: 1 })),
+  ];
+
+  it("rejects a bad idea (votes reach the threshold, more bad than good), and says so", async () => {
+    db.ideaVerdict.findMany.mockResolvedValue(verdicts(2, 4));
+    const result = await rejectIdea(manager("manager"), "p1", "7");
+    expect(result).toMatchObject({ ideaId: "i1", ideaNumber: 7, status: "rejected", totalVotes: 6, goodVotes: 2 });
+    expect(db.idea.update).toHaveBeenCalledWith({
+      where: { id: "i1" },
+      data: { status: "rejected", rejectedAt: expect.any(Date), rejectedByAgentId: "agent-dana" },
+    });
+    expect(publish).toHaveBeenCalledWith(db, expect.objectContaining({
+      type: "idea.rejected",
+      projectId: "p1",
+      payload: expect.objectContaining({ ideaId: "i1", ideaNumber: 7, totalVotes: 6, goodVotes: 2 }),
+    }));
+    expect(audit).toHaveBeenCalledWith(expect.anything(), "idea.rejected", "idea:i1", { totalVotes: 6, goodVotes: 2 });
+  });
+
+  it("uses the project's idea threshold", async () => {
+    // Its own project id, so the cached workflow can't leak into other cases.
+    db.projectWorkflow.findUnique.mockResolvedValue({ ideaThreshold: 8 });
+    db.ideaVerdict.findMany.mockResolvedValue(verdicts(0, 6));
+    await expect(rejectIdea(manager("manager"), "p8", "i1")).rejects.toMatchObject({ status: 409, body: { error: "not_rejectable", totalVotes: 6, goodVotes: 0 } });
+    expect(db.idea.update).not.toHaveBeenCalled();
+  });
+
+  it("needs a manager agent", async () => {
+    db.ideaVerdict.findMany.mockResolvedValue(verdicts(0, 6));
+    await expect(rejectIdea(manager("working"), "p1", "i1")).rejects.toMatchObject({ name: "AgentLevelError" });
+    expect(db.idea.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an idea below the idea threshold, or with as many good votes as others, as not_rejectable", async () => {
+    // The project's idea threshold is the default, 3.
+    db.ideaVerdict.findMany.mockResolvedValue(verdicts(0, 2));
+    await expect(rejectIdea(manager("manager"), "p1", "i1")).rejects.toMatchObject({ status: 409, body: { error: "not_rejectable", totalVotes: 2, goodVotes: 0 } });
+    db.ideaVerdict.findMany.mockResolvedValue(verdicts(2, 2));
+    await expect(rejectIdea(manager("manager"), "p1", "i1")).rejects.toMatchObject({ status: 409, body: { error: "not_rejectable", totalVotes: 4, goodVotes: 2 } });
+    expect(db.idea.update).not.toHaveBeenCalled();
+  });
+
+  it("refuses an idea that is no longer open", async () => {
+    db.ideaVerdict.findMany.mockResolvedValue(verdicts(0, 6));
+    db.$queryRaw.mockResolvedValue([idea({ status: "rejected" })]);
+    await expect(rejectIdea(manager("manager"), "p1", "i1")).rejects.toMatchObject({ status: 409, body: { error: "idea_rejected" } });
+    db.$queryRaw.mockResolvedValue([idea({ status: "converted" })]);
+    await expect(rejectIdea(manager("manager"), "p1", "i1")).rejects.toMatchObject({ status: 409, body: { error: "idea_converted" } });
     expect(db.idea.update).not.toHaveBeenCalled();
   });
 });

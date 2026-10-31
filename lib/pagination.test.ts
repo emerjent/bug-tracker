@@ -102,7 +102,7 @@ describe("buildPaginationUrl", () => {
       buildPaginationUrl("/issues", 3, {
         q: "test",
         status: "OPEN",
-        severity: "",
+        area: "",
         empty: null,
       }),
     ).toBe("/issues?q=test&status=OPEN&page=3");
@@ -113,9 +113,9 @@ describe("buildPaginationUrl", () => {
       buildPaginationUrl("/issues", 2, {
         q: "crash",
         status: "open",
-        sort: "top_votes",
+        sort: "importance",
       }),
-    ).toBe("/issues?q=crash&status=open&sort=top_votes&page=2");
+    ).toBe("/issues?q=crash&status=open&sort=importance&page=2");
   });
 
   it("returns base path when no query params and page is 1", () => {

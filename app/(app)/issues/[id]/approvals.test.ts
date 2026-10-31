@@ -100,7 +100,6 @@ const mockDb = vi.hoisted(() => ({
   bug: { findUnique: vi.fn(), findFirst: vi.fn(async () => ({ id: "bug-1", number: 1 })) },
   redesignProposal: { findMany: vi.fn().mockResolvedValue([]) },
   issueBid: { findMany: vi.fn().mockResolvedValue([]) },
-  issueInterest: { count: vi.fn().mockResolvedValue(0) },
   issueApproval: { findFirst: vi.fn() },
   agentQuestion: { findMany: vi.fn().mockResolvedValue([]) },
   user: { findMany: vi.fn().mockResolvedValue([]) },
@@ -113,8 +112,8 @@ const mockDb = vi.hoisted(() => ({
   attachment: { findMany: vi.fn().mockResolvedValue([]) },
   bugRevision: { findFirst: vi.fn().mockResolvedValue(null) },
   milestone: { findMany: vi.fn().mockResolvedValue([]) },
-  issueValidation: { findMany: vi.fn().mockResolvedValue([]) },
-  issueClaim: { findMany: vi.fn().mockResolvedValue([]) },
+  issueConfirmation: { findMany: vi.fn().mockResolvedValue([]) },
+  issueClaim: { findMany: vi.fn().mockResolvedValue([]), findFirst: vi.fn().mockResolvedValue(null) },
   testVerdict: { findMany: vi.fn().mockResolvedValue([]) },
   agentAuditEvent: { findMany: vi.fn().mockResolvedValue([]) },
 }));
@@ -141,7 +140,6 @@ describe("Issue page human approval banner (#598)", () => {
       title: "Test Bug",
       description: "Test Description",
       status: "open",
-      severity: "medium",
       voteCount: 0,
       proofLinks: [],
       reporterId: "reporter-1",
@@ -170,7 +168,6 @@ describe("Issue page human approval banner (#598)", () => {
       status: "pending",
       rule: {
         issueType: { name: "Design" },
-        severity: null,
         fileGlob: null,
       },
     });

@@ -6,11 +6,9 @@ type Item = { kind: string; key: string; minimumRole: string; canAct: boolean; b
 
 /** The one work list every agent watches: `/<project-slug>/work`, or `pnpm ziki work`. */
 describe("the work feed", () => {
-  const agentIds = new Map<string, Agent>();
   let slug: string;
 
   beforeAll(async () => {
-    for (const agent of ["ada", "bob", "cara", "dana", "eli"] as const) agentIds.set((await ok(agent, "whoami")).id, agent);
     slug = (await ok("ada", "whoami")).project_slug;
   });
 
@@ -20,6 +18,17 @@ describe("the work feed", () => {
     ((await ok(agent, "list-point-entries", { limit: 100 })).items as { role: string; points: number; idea: { id: string } | null }[])
       .filter((entry) => entry.role === "idea" && entry.idea?.id === ideaId)
       .reduce((sum, entry) => sum + entry.points, 0);
+
+  it("counts issues per status and ideas per idea status, the numbers the tabs show", async () => {
+    const counts = await ok("bob", "count-issues");
+    const statuses = ["requires_confirmation", "open", "in_progress", "delivered", "done", "ready_to_merge", "resolved", "closed"];
+    expect(Object.keys(counts.issues).sort()).toEqual([...statuses, "all"].sort());
+    expect(counts.issues.all).toBe(statuses.reduce((sum, status) => sum + counts.issues[status], 0));
+    expect(Object.keys(counts.ideas).sort()).toEqual(["converted", "open", "rejected"]);
+    // The same issues the list returns for that status.
+    const open = await ok("bob", "list-issues", { status: "open", limit: 100 });
+    expect(open.items.length).toBe(Math.min(counts.issues.open, 100));
+  });
 
   it("is what a connecting agent is told to watch", async () => {
     const me = await ok("bob", "whoami");
@@ -78,25 +87,28 @@ describe("the work feed", () => {
     expect((await work("dana")).ask.join(" ")).toMatch(/convert/);
     const { issueId } = await ok("dana", "convert-idea", { id: idea });
     const confirmItem = itemFor((await work("cara")).items, "confirm_issue", issueId);
-    expect(confirmItem?.actions.map((action) => action.name)).toEqual(["validate_issue", "check_duplicate"]);
+    expect(confirmItem?.actions.map((action) => action.name)).toEqual(["confirm_issue"]);
     expect(itemFor((await work("cara")).items, "idea", idea)).toBeUndefined();
   });
 
   it("lists offers to the agent and then its claim, with what to do next", async () => {
     const issue = await fileIssue("ada", "Work feed: an issue to offer", ["bob", "cara", "eli"]);
-    await confirm(issue, ["bob", "cara"], "dana");
+    await confirm(issue, ["bob", "cara"]);
 
-    // A confirmed issue is listed to take; it is offered once an agent asks.
+    // A confirmed issue is listed to bid on; it is offered only once a manager agent awards a bid.
     expect(await offeredTo(issue)).toBeNull();
-    expect(itemFor((await work("bob")).items, "ready_issue", issue), "ready issues are listed to take").toBeTruthy();
-    const requested = (await ok("bob", "request-offer", { id: issue })).offer;
-    const offer = { agent: agentIds.get(requested.agentId)!, offerId: requested.id };
-    const offered = (await work(offer.agent)).items.find((item) => item.key === `offer:${offer.offerId}`);
-    expect(offered?.actions[0].cli).toBe(`accept-offer --id ${offer.offerId}`);
-    await ok(offer.agent, "accept-offer", { id: offer.offerId });
-    const claim = itemFor((await work(offer.agent)).items, "active_claim", issue);
-    expect(claim?.actions.map((action) => action.name)).toEqual(["heartbeat", "link_pull_request", "release_claim"]);
-    await ok(offer.agent, "release-claim", { id: issue, reason: "Done testing the feed." });
+    const ready = itemFor((await work("bob")).items, "ready_issue", issue);
+    expect(ready, "ready issues are listed to bid on").toBeTruthy();
+    expect(ready!.actions.map((action) => action.name)).toEqual(["bid"]);
+    const bid = await ok("bob", "bid", { id: issue, summary: "I can fix this.", description: "I will reproduce it, fix it and add a test." });
+    const awarded = await ok("dana", "award-bid", { id: bid.bid_id });
+    const offered = (await work("bob")).items.find((item) => item.key === `offer:${awarded.claimId}`);
+    expect(offered?.issue?.id).toBe(issue);
+    expect(offered?.actions[0].cli).toBe(`accept-offer --id ${awarded.claimId}`);
+    await ok("bob", "accept-offer", { id: awarded.claimId });
+    const claim = itemFor((await work("bob")).items, "active_claim", issue);
+    expect(claim?.actions.map((action) => action.name)).toEqual(["heartbeat", "deliver", "release_claim"]);
+    await ok("bob", "release-claim", { id: issue, reason: "Done testing the feed." });
   });
 
   it("shows manager and merger tasks to everyone, but only lets those classes act", async () => {
@@ -114,7 +126,10 @@ describe("the work feed", () => {
     const roles = new Map((await work("bob")).items.map((item) => [item.kind, item.minimumRole]));
     if (roles.has("merge_fix")) expect(roles.get("merge_fix")).toBe("merger");
     if (roles.has("accept_fix")) expect(roles.get("accept_fix")).toBe("manager");
-    if (roles.has("dispatch")) expect(roles.get("dispatch")).toBe("manager");
+    if (roles.has("award_bid")) expect(roles.get("award_bid")).toBe("manager");
+    if (roles.has("close_issue")) expect(roles.get("close_issue")).toBe("manager");
+    if (roles.has("review_bid")) expect(roles.get("review_bid")).toBe("working");
+    expect(roles.has("dispatch")).toBe(false);
   });
 
   it("refuses another project's work and needs a key", async () => {
