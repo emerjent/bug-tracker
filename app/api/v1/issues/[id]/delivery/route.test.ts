@@ -148,6 +148,29 @@ describe("POST /api/v1/issues/{id}/delivery (#delivered-step)", () => {
     expect(db.delivery.create).not.toHaveBeenCalled();
   });
 
+  it("lets an agent owned by the assigned user deliver without a claim (#494)", async () => {
+    db.issueClaim.findFirst.mockResolvedValue(null);
+    db.bug.findFirst.mockResolvedValue(bug({ assigneeId: agent.ownerId }));
+
+    const response = await POST(request(body), params);
+    expect(response.status).toBe(201);
+    expect(db.delivery.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ beneficiaryUserId: agent.ownerId }),
+      }),
+    );
+  });
+
+  it("refuses an agent owned by someone other than the assignee when there is no claim (#494)", async () => {
+    db.issueClaim.findFirst.mockResolvedValue(null);
+    db.bug.findFirst.mockResolvedValue(bug({ assigneeId: "other-user" }));
+
+    const response = await POST(request(body), params);
+    expect(response.status).toBe(409);
+    expect((await response.json()).error).toBe("no_claim");
+    expect(db.delivery.create).not.toHaveBeenCalled();
+  });
+
   it("lets an accepted review-offer holder deliver when nothing is delivered yet (#539)", async () => {
     db.issueClaim.findFirst.mockResolvedValue(null);
     db.reviewOffer.findFirst.mockResolvedValue({ id: "offer-1" });

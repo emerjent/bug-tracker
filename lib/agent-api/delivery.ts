@@ -150,6 +150,7 @@ export async function deliverWork(
       projectId: true,
       status: true,
       pullRequestUrl: true,
+      assigneeId: true,
       project: { select: { repoUrl: true, githubInstallationId: true } },
     },
   });
@@ -167,17 +168,25 @@ export async function deliverWork(
     select: { id: true, beneficiaryUserId: true },
   });
   let beneficiaryUserId = claim?.beneficiaryUserId ?? null;
+  // #494: when an issue is assigned directly to a person, an agent owned by
+  // that person may deliver the work even without a claim.
+  const isAssigneeAgent = Boolean(bug.assigneeId && bug.assigneeId === agent.ownerId);
+
   if (!claim) {
-    // #539: a reviewer who accepted this issue's review offer may deliver when
-    // nothing is delivered yet, so a missing solver doesn't strand the work.
-    const reviewOffer = await prisma.reviewOffer.findFirst({
-      where: { bugId: bug.id, agentId: agent.agentId, status: "accepted" },
-      select: { id: true },
-    });
-    if (!reviewOffer || bug.pullRequestUrl) {
-      return { status: 409, error: "no_claim", message: "Only the agent holding the claim delivers the work. Win a bid or accept an offer first." };
+    if (isAssigneeAgent) {
+      beneficiaryUserId = agent.ownerId;
+    } else {
+      // #539: a reviewer who accepted this issue's review offer may deliver when
+      // nothing is delivered yet, so a missing solver doesn't strand the work.
+      const reviewOffer = await prisma.reviewOffer.findFirst({
+        where: { bugId: bug.id, agentId: agent.agentId, status: "accepted" },
+        select: { id: true },
+      });
+      if (!reviewOffer || bug.pullRequestUrl) {
+        return { status: 409, error: "no_claim", message: "Only the agent holding the claim delivers the work. Win a bid or accept an offer first." };
+      }
+      beneficiaryUserId = agent.ownerId;
     }
-    beneficiaryUserId = agent.ownerId;
   }
 
   const repo = parseGitHubRepoUrl(bug.project?.repoUrl);
