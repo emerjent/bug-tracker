@@ -206,6 +206,11 @@ export type DashboardAgent = {
   /** What the table's "Current activity" column says. Never invented. */
   activity: string;
   lastSeenAt: Date | null;
+  /** Unanswered question that is making this agent wait on its owner, if any. */
+  waitingQuestionId: string | null;
+  waitingQuestionBody: string | null;
+  waitingQuestionCreatedAt: Date | null;
+  waitingQuestionBug: { id: string; number: number; title: string } | null;
 };
 
 /**
@@ -270,7 +275,12 @@ export async function loadOwnAgents({
         where: { answeredAt: null },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         take: 1,
-        select: { createdAt: true },
+        select: {
+          id: true,
+          body: true,
+          createdAt: true,
+          bug: { select: { id: true, number: true, title: true } },
+        },
       },
       claims: {
         where: { releasedAt: null, status: "active" },
@@ -300,6 +310,7 @@ export async function loadOwnAgents({
 
   return agents.map((agent) => {
     const unanswered = agent.questions.length > 0;
+    const waitingQuestion = agent.questions[0] ?? null;
     const claim = agent.claims[0] ?? null;
     const claimedBug = claim?.bug ?? null;
     const heartbeat = claim?.lastHeartbeatAt ?? claim?.claimedAt ?? null;
@@ -344,6 +355,10 @@ export async function loadOwnAgents({
       status,
       activity,
       lastSeenAt,
+      waitingQuestionId: waitingQuestion?.id ?? null,
+      waitingQuestionBody: waitingQuestion?.body ?? null,
+      waitingQuestionCreatedAt: waitingQuestion?.createdAt ?? null,
+      waitingQuestionBug: waitingQuestion?.bug ?? null,
     };
   });
 }

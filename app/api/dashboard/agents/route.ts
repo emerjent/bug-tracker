@@ -27,6 +27,7 @@ export async function GET() {
         agents: agents.map((agent) => ({
           ...agent,
           lastSeenAt: agent.lastSeenAt ? agent.lastSeenAt.toISOString() : null,
+          waitingQuestionCreatedAt: agent.waitingQuestionCreatedAt ? agent.waitingQuestionCreatedAt.toISOString() : null,
         })),
       },
       { headers: { "Cache-Control": "no-store" } },

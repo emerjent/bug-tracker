@@ -4,6 +4,8 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { BASE_PATH } from "@/lib/base-path";
 import { RelativeTime } from "@/components/relative-time";
+import { parseEscalationBody } from "@/lib/escalation-body";
+import { EscalationTypeBadge, QuickResolveButtons } from "@/app/(app)/escalations/escalation-controls";
 
 /**
  * The serialized row the server sends and the poll endpoint returns. Kept
@@ -20,6 +22,17 @@ export type DashboardAgentView = {
   status: DashboardAgentStatus;
   activity: string;
   lastSeenAt: string | null;
+  waitingQuestionId?: string | null;
+  waitingQuestionBody?: string | null;
+  waitingQuestionCreatedAt?: string | null;
+  waitingQuestionBug?: { id: string; number: number; title: string } | null;
+  // Compatibility aliases for callers/tests that use other names.
+  pendingQuestionId?: string | null;
+  pendingQuestionBody?: string | null;
+  questionId?: string | null;
+  questionBody?: string | null;
+  escalationId?: string | null;
+  escalationBody?: string | null;
 };
 
 export const AGENTS_POLL_MS = 30_000;
@@ -34,6 +47,12 @@ const statusMeta: Record<
   offline: { label: "Offline", dot: "bg-zk-muted", text: "text-zk-muted" },
 };
 
+function waitingQuestionId(agent: DashboardAgentView): string | null {
+  return agent.waitingQuestionId || agent.pendingQuestionId || agent.questionId || agent.escalationId || null;
+}
+function waitingQuestionBody(agent: DashboardAgentView): string | null {
+  return agent.waitingQuestionBody || agent.pendingQuestionBody || agent.questionBody || agent.escalationBody || null;
+}
 export function DashboardAgents({
   initial,
 }: {
@@ -125,6 +144,63 @@ export function DashboardAgents({
               </Link>
             </div>
           ) : (
+            <>
+            {agents.some((a) => a.status === "waiting") ? (
+              <div className="space-y-3 border-b border-zk-divider px-5 py-4">
+                <p className="text-xs font-bold uppercase tracking-[0.08em] text-zk-accent">
+                  Needs your response
+                </p>
+                {agents
+                  .filter((a) => a.status === "waiting")
+                  .map((agent) => {
+                    const qId = waitingQuestionId(agent);
+                    const rawBody = waitingQuestionBody(agent) || agent.activity || "";
+                    const parsed = parseEscalationBody(rawBody);
+                    const bug = agent.waitingQuestionBug;
+                    return (
+                      <div
+                        key={agent.id}
+                        className="space-y-2 rounded-xl border border-zk-warn-bd bg-zk-warn-bg/20 p-3"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <EscalationTypeBadge type={parsed.type} />
+                          <span className="font-semibold text-zk-text">
+                            {agent.name}
+                          </span>
+                          {agent.waitingQuestionCreatedAt ? (
+                            <RelativeTime date={agent.waitingQuestionCreatedAt} className="text-xs text-zk-muted" />
+                          ) : null}
+                        </div>
+                        <p className="whitespace-pre-wrap text-sm text-zk-text">
+                          {parsed.cleanBody || rawBody}
+                        </p>
+                        {bug ? (
+                          <p className="text-xs text-zk-muted">
+                            Issue:{" "}
+                            <Link
+                              href={`/issues/${bug.id}`}
+                              className="font-semibold text-zk-accent hover:underline"
+                            >
+                              #{bug.number} {bug.title}
+                            </Link>
+                          </p>
+                        ) : null}
+                        {qId ? (
+                          <div className="flex flex-wrap items-center gap-2 border-t border-zk-divider pt-2">
+                            <QuickResolveButtons escalationId={qId} />
+                            <Link
+                              href={`/escalations/${qId}`}
+                              className="text-xs font-semibold text-zk-accent hover:underline"
+                            >
+                              Write a response →
+                            </Link>
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+              </div>
+            ) : null}
             <div className="overflow-x-auto">
               <table className="w-full border-collapse text-left text-sm">
                 <thead>
@@ -173,6 +249,7 @@ export function DashboardAgents({
                 </tbody>
               </table>
             </div>
+            </>
           )}
         </div>
       ) : null}

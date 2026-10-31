@@ -29,6 +29,12 @@ import { formatPoints, TARGET_POINTS } from "@/lib/points/rules";
 import { prisma } from "@/lib/prisma";
 import { openIssueStages, type IssueStage } from "@/lib/issue-stage";
 import { voteDirection } from "@/lib/voting";
+import { loadAgentCenter } from "@/lib/agent-center/queries";
+import { parseEscalationBody } from "@/lib/escalation-body";
+import { IssueApprovalBanner } from "@/components/issue-approval-banner";
+import { EscalationTypeBadge, QuickResolveButtons } from "@/app/(app)/escalations/escalation-controls";
+import { recentNotificationsAction } from "@/app/actions/notifications";
+import { DashboardAttentionPanel } from "@/components/dashboard-attention-panel";
 
 export const metadata: Metadata = { title: "Dashboard" };
 
@@ -210,9 +216,26 @@ export default async function DashboardPage() {
     }
   }
 
+  let attention: Awaited<ReturnType<typeof loadAgentCenter>> = null;
+  let notifications: Awaited<ReturnType<typeof recentNotificationsAction>> = [];
+  if (tenantId) {
+    try {
+      attention = await loadAgentCenter(user.id, tenantId);
+    } catch (error) {
+      console.error("[dashboard] attention query failed", error);
+    }
+    try {
+      notifications = await recentNotificationsAction();
+    } catch (error) {
+      console.error("[dashboard] notifications query failed", error);
+    }
+  }
   const agents: DashboardAgentView[] = agentRows.map((agent) => ({
     ...agent,
     lastSeenAt: agent.lastSeenAt ? agent.lastSeenAt.toISOString() : null,
+    waitingQuestionCreatedAt: agent.waitingQuestionCreatedAt
+      ? agent.waitingQuestionCreatedAt.toISOString()
+      : null,
   }));
 
   const weekPoints = pointsThisWeek(historyEntries, now);
@@ -263,13 +286,23 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
-      <OverviewStatCards stats={stats} />
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="min-w-0 space-y-5">
+          <OverviewStatCards stats={stats} />
 
-      <AssignedIssuesTable issues={assignedIssues} />
+          <AssignedIssuesTable issues={assignedIssues} />
 
-      <PointsChart entries={chartEntries} nowIso={now.toISOString()} />
+          <PointsChart entries={chartEntries} nowIso={now.toISOString()} />
 
-      <DashboardAgents initial={agents} />
+          <DashboardAgents initial={agents} />
+        </div>
+
+        <DashboardAttentionPanel
+          tenantId={tenantId}
+          attention={attention}
+          notifications={notifications}
+        />
+      </div>
     </div>
   );
 }

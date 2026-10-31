@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { parseEscalationBody } from "@/lib/agent-questions";
+import { parseEscalationBody } from "@/lib/escalation-body";
 import { LocalTime } from "@/components/local-time";
 import { EscalationTypeBadge, QuickResolveButtons } from "@/app/(app)/escalations/escalation-controls";
 
